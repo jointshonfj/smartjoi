@@ -209,7 +209,7 @@ function renderHub() {
           <h3>${esc(a.title)}</h3>
           <p>${esc(a.desc)}</p>
           <div class="badge-row">
-            ${c.toOrder ? `<span class="badge warn"><span class="dot"></span>${c.toOrder} k objednání</span>` : `<span class="badge ok"><span class="dot"></span>Vše objednáno</span>`}
+            ${c.toOrder ? `<span class="badge warn"><span class="dot"></span>${c.toOrder} k objednání</span>` : c.unassigned ? '' : `<span class="badge ok"><span class="dot"></span>Vše objednáno</span>`}
             ${c.unassigned ? `<span class="badge bad">${c.unassigned} bez dodavatele</span>` : ''}
           </div>
         </a>`).join('')}
@@ -629,6 +629,7 @@ function renderLogin(msg = '', email = '') {
   $('#user').innerHTML = '';
   $('#view').innerHTML = `
     <section class="hero" style="max-width:420px;margin:0 auto">
+      <img src="logo.png" alt="" width="84" height="84" style="display:block;margin-bottom:18px">
       <div class="eyebrow">Jointshon — FJ · interní nástroje</div>
       <h1>Přihlášení</h1>
       <p>SmartJoi je jen pro tebe. Přihlas se účtem ze Supabase.</p>
