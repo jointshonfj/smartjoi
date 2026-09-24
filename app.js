@@ -5,7 +5,7 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
 let busy = false;
-const ui = { search: '', orderFilter: 'active', aufFilter: 'sent', docs: {}, includeRefs: false, showPast: false };
+const ui = { emailSearch: '', emailCat: '', emailVals: {}, search: '', orderFilter: 'active', aufFilter: 'sent', docs: {}, includeRefs: false, showPast: false };
 
 const COUNTRIES = [
   ['DE', 'Německo'], ['AT', 'Rakousko'], ['PL', 'Polsko'], ['SK', 'Slovensko'], ['IT', 'Itálie'], ['NL', 'Nizozemsko'],
@@ -87,7 +87,7 @@ async function fetchAll(table, build = q => q) {
 }
 async function loadState() {
   const since = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  const [st, sups, prods, orders, items, aufs, ships, events] = await Promise.all([
+  const [st, sups, prods, orders, items, aufs, ships, events, emails] = await Promise.all([
     sb.from('settings').select('*').eq('id', 1).single().then(ok),
     fetchAll('suppliers', q => q.order('name')),
     fetchAll('products', q => q.order('code')),
@@ -96,6 +96,7 @@ async function loadState() {
     fetchAll('aufs', q => q.order('created_at', { ascending: false })),
     fetchAll('shipments', q => q.order('ship_date')),
     sb.from('calendar_events').select('*').gte('starts_on', since).order('starts_on').limit(200).then(ok),
+    fetchAll('email_templates', q => q.order('title')),
   ]);
   const products = {};
   for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name, nameEn: p.name_en || '', nameEnSrc: p.name_en_src || '', mpn: p.mpn || '', shoptetSupplier: p.shoptet_supplier || '' };
@@ -108,6 +109,7 @@ async function loadState() {
     aufs: aufs.map(a => ({ id: a.id, orderCode: a.order_code, supplierId: a.supplier_id || '', status: a.status, to: a.email_to, subject: a.subject, body: a.body, lines: a.lines || [], sentAt: a.sent_at, aufNumber: a.auf_number || '', amount: a.amount_eur == null ? null : Number(a.amount_eur), confirmedAt: a.confirmed_at, note: a.note || '', shipmentId: a.shipment_id || '', createdAt: a.created_at })),
     shipments: ships.map(s => ({ id: s.id, date: s.ship_date || '', note: s.note || '' })),
     events,
+    emails: emails.map(e => ({ id: e.id, title: e.title, category: e.category || '', to: e.to_addr || '', cc: e.cc || '', subject: e.subject || '', body: e.body || '', note: e.note || '', pinned: !!e.pinned, useCount: e.use_count || 0, lastUsed: e.last_used_at, updatedAt: e.updated_at })),
     sync: { fetchedAt: st.last_sync_at, error: st.last_sync_error, errorAt: st.last_sync_error_at, headers: st.sync_headers || [], rowCount: st.sync_row_count, sample: st.sync_sample || [], statuses: st.sync_statuses || {} },
   };
 }
@@ -183,8 +185,13 @@ function render() {
   const r = route();
   const crumb = $('#crumb');
   if (r.app === 'kalendar') { crumb.innerHTML = `<span>/</span><b>Kalendář</b>`; return renderCalendar(); }
+  if (r.app === 'emaily') {
+    const e = r.tab === 'e' ? emailById(r.id) : null;
+    crumb.innerHTML = `<span>/</span><a href="#/emaily">EmailJoi</a>${e ? `<span>/</span><b>${esc(e.title)}</b>` : ''}`;
+    return r.tab === 'e' ? renderEmailDetail(r.id) : renderEmailList();
+  }
   if (r.app !== 'objednavky') { crumb.innerHTML = ''; return renderHub(); }
-  crumb.innerHTML = `<span>/</span><a href="#/objednavky">Objednávky od dodavatelů</a>${r.tab === 'o' ? `<span>/</span><b>${esc(r.id)}</b>` : ''}`;
+  crumb.innerHTML = `<span>/</span><a href="#/objednavky">OrderJoi</a>${r.tab === 'o' ? `<span>/</span><b>${esc(r.id)}</b>` : ''}`;
   if (r.tab === 'o') return renderOrderDetail(r.id);
   renderOrdersApp(r.tab || 'objednavky');
 }
@@ -202,14 +209,20 @@ function renderHub() {
     <div class="apps">
       <a class="app-card" href="#/objednavky">
         <div class="row"><div class="app-icon">📦</div><span class="num grow" style="text-align:right">01</span></div>
-        <h3>Objednávky od dodavatelů</h3>
-        <p>Objednávky ze Shoptetu → e-mail dodavateli → AUF → svoz.</p>
+        <h3>OrderJoi</h3>
+        <p>Objednávky od dodavatelů: Shoptet → e-mail dodavateli → AUF → svoz.</p>
         <div class="badge-row">
           ${c.todo ? `<span class="badge warn"><span class="dot"></span>${c.todo} potřeba objednat</span>` : ''}
           ${c.sentAufs ? `<span class="badge info">${c.sentAufs} čeká na AUF</span>` : ''}
           ${c.unshipped ? `<span class="badge ok">${c.unshipped} AUF bez svozu</span>` : ''}
           ${!c.todo && !c.sentAufs && !c.unshipped ? `<span class="badge ok"><span class="dot"></span>Vše vyřízeno</span>` : ''}
         </div>
+      </a>
+      <a class="app-card" href="#/emaily">
+        <div class="row"><div class="app-icon">✉️</div><span class="num grow" style="text-align:right">02</span></div>
+        <h3>EmailJoi</h3>
+        <p>Často posílané e-maily — adresa, předmět a text připravené ke zkopírování.</p>
+        <div class="badge-row"><span class="badge">${plural(S.emails.length, 'šablona', 'šablony', 'šablon')}</span>${S.emails.some(e => e.pinned) ? `<span class="badge info">★ ${S.emails.filter(e => e.pinned).length} připnuté</span>` : ''}</div>
       </a>
       <a class="app-card" href="#/kalendar">
         <div class="row"><div class="app-icon">📅</div><span class="num grow" style="text-align:right">SmartJoi</span></div>
@@ -244,7 +257,7 @@ export const SJCalendar = {
 function renderCalendar() {
   const up = S.events.filter(e => e.starts_on >= todayIso());
   const past = S.events.filter(e => e.starts_on < todayIso()).reverse();
-  const APPN = { objednavky: '📦 Objednávky' };
+  const APPN = { objednavky: '📦 OrderJoi' };
   const row = e => `<tr><td style="white-space:nowrap"><b>${esc(fmtDay(e.starts_on))}</b></td><td>${esc(e.title)}<div class="sub">${esc(APPN[e.app] || e.app)}</div></td>
     <td style="text-align:right"><a class="btn sm" target="_blank" rel="noopener" href="${esc(gcalLink({ title: e.title, date: e.starts_on, details: e.details }))}">＋ Google</a></td></tr>`;
   $('#view').innerHTML = `
@@ -273,6 +286,162 @@ function renderCalendar() {
   };
 }
 
+// ---------- APLIKACE 02: EMAILJOI ----------
+const emailById = id => S.emails.find(e => e.id === id);
+// proměnné v šabloně: {cokoliv}; {datum}/{dnes} se doplní samy
+const AUTO_VARS = { datum: () => new Date().toLocaleDateString('cs-CZ'), dnes: () => new Date().toLocaleDateString('cs-CZ'), date: () => new Date().toLocaleDateString('en-GB') };
+const VAR_RE = /\{([^{}\n]{1,40})\}/g;
+function emailVars(e) {
+  const set = new Set();
+  for (const t of [e.to, e.cc, e.subject, e.body]) for (const m of String(t).matchAll(VAR_RE)) if (!AUTO_VARS[m[1].trim().toLowerCase()]) set.add(m[1].trim());
+  return [...set];
+}
+function fillEmail(e, vals = {}) {
+  const f = t => String(t || '').replace(VAR_RE, (m, k) => { const key = k.trim(); const a = AUTO_VARS[key.toLowerCase()]; return a ? a() : (vals[key] ? vals[key] : m); });
+  return { to: f(e.to), cc: f(e.cc), subject: f(e.subject), body: f(e.body) };
+}
+const mailtoLink = x => 'mailto:' + encodeURIComponent(x.to).replace(/%40/g, '@').replace(/%2C/gi, ',') + '?' +
+  [x.cc && 'cc=' + encodeURIComponent(x.cc), 'subject=' + encodeURIComponent(x.subject), 'body=' + encodeURIComponent(x.body)].filter(Boolean).join('&');
+function markUsed(id) {
+  const e = emailById(id); if (!e) return;
+  e.useCount++; e.lastUsed = new Date().toISOString();
+  sb.from('email_templates').update({ use_count: e.useCount, last_used_at: e.lastUsed }).eq('id', id).then(() => {}, () => {});
+}
+const emailCats = () => [...new Set(S.emails.map(e => e.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'cs'));
+function renderEmailList() {
+  const q = ui.emailSearch.trim().toLowerCase(), cats = emailCats();
+  if (ui.emailCat && !cats.includes(ui.emailCat)) ui.emailCat = '';
+  const list = S.emails
+    .filter(e => !ui.emailCat || e.category === ui.emailCat)
+    .filter(e => !q || [e.title, e.category, e.to, e.cc, e.subject, e.body, e.note].join(' ').toLowerCase().includes(q))
+    .sort((a, b) => (b.pinned - a.pinned) || (b.useCount - a.useCount) || a.title.localeCompare(b.title, 'cs'));
+  $('#view').innerHTML = `
+    <div class="page-head">
+      <div><div class="eyebrow">Aplikace 02 · Často posílané e-maily</div><h1>EmailJoi</h1></div>
+      <div class="row"><button class="btn primary" id="em-new">＋ Nový e-mail</button></div>
+    </div>
+    ${S.emails.length ? `<div class="row em-tools">
+      <input type="search" id="em-search" placeholder="Hledat v názvu, adrese, předmětu i textu…" value="${esc(ui.emailSearch)}">
+      ${cats.length ? `<div class="chips"><button class="chip ${!ui.emailCat ? 'on' : ''}" data-ecat="">Vše <span class="muted">${S.emails.length}</span></button>${cats.map(c => `<button class="chip ${ui.emailCat === c ? 'on' : ''}" data-ecat="${esc(c)}">${esc(c)} <span class="muted">${S.emails.filter(e => e.category === c).length}</span></button>`).join('')}</div>` : ''}
+    </div>` : ''}
+    ${!S.emails.length ? `<div class="card empty"><div class="big">✉️</div><b>Zatím tu nic není.</b><div class="small">Založ si první e-mail, který posíláš často — adresu, předmět a text pak jen kopíruješ.</div><div style="margin-top:14px"><button class="btn primary" data-emnew2>＋ Nový e-mail</button></div></div>`
+    : !list.length ? `<div class="card empty">Nic nenalezeno.</div>`
+    : `<div class="em-grid">${list.map(e => { const x = fillEmail(e, ui.emailVals[e.id]); const vars = emailVars(e); return `
+      <div class="card em-card">
+        <a class="em-open" href="#/emaily/e/${e.id}">
+          <div class="row" style="gap:8px;align-items:flex-start"><h3 class="grow">${e.pinned ? '<span class="em-star" title="Připnuto">★</span> ' : ''}${esc(e.title || '(bez názvu)')}</h3>${e.category ? `<span class="badge">${esc(e.category)}</span>` : ''}</div>
+          <div class="em-meta"><span class="muted">Komu</span> ${esc(e.to) || '<span class="muted">—</span>'}</div>
+          <div class="em-meta"><span class="muted">Předmět</span> ${esc(e.subject) || '<span class="muted">—</span>'}</div>
+          <div class="em-preview">${esc(e.body.slice(0, 220))}${e.body.length > 220 ? '…' : ''}</div>
+        </a>
+        <div class="row em-actions">
+          ${vars.length ? `<a class="btn sm primary" href="#/emaily/e/${e.id}">Vyplnit ${plural(vars.length, 'údaj', 'údaje', 'údajů')} →</a>` : `
+          <button class="btn sm" data-ecopy="${e.id}" data-f="to" ${x.to ? '' : 'disabled'}>Adresa</button>
+          <button class="btn sm" data-ecopy="${e.id}" data-f="subject" ${x.subject ? '' : 'disabled'}>Předmět</button>
+          <button class="btn sm" data-ecopy="${e.id}" data-f="body">Text</button>
+          <a class="btn sm ghost" href="${esc(mailtoLink(x))}" data-emailto="${e.id}" title="Otevřít v poštovním programu">✉ Mail</a>`}
+          <span class="grow"></span><span class="small muted" title="Kolikrát zkopírováno">${e.useCount ? e.useCount + '×' : ''}</span>
+        </div>
+      </div>`; }).join('')}</div>`}`;
+  const V = $('#view');
+  $('#em-new').onclick = () => editEmail('');
+  V.querySelectorAll('[data-emnew2]').forEach(b => b.onclick = () => editEmail(''));
+  const se = $('#em-search');
+  if (se) se.oninput = () => { ui.emailSearch = se.value; const pos = se.selectionStart; renderEmailList(); const n = $('#em-search'); n.focus(); n.setSelectionRange(pos, pos); };
+  V.querySelectorAll('[data-ecat]').forEach(b => b.onclick = () => { ui.emailCat = b.dataset.ecat; renderEmailList(); });
+  V.querySelectorAll('[data-ecopy]').forEach(b => b.onclick = () => { const e = emailById(b.dataset.ecopy); copyText(fillEmail(e, ui.emailVals[e.id])[b.dataset.f]); markUsed(e.id); });
+  V.querySelectorAll('[data-emailto]').forEach(a => a.addEventListener('click', () => markUsed(a.dataset.emailto)));
+}
+function renderEmailDetail(id) {
+  const e = emailById(id);
+  if (!e) { $('#view').innerHTML = `<div class="card empty">E-mail nenalezen. <a href="#/emaily">Zpět</a></div>`; return; }
+  const vals = ui.emailVals[id] ||= {};
+  const vars = emailVars(e);
+  const x = fillEmail(e, vals);
+  const field = (f, label, val, multi) => `
+    <div class="em-field">
+      <div class="row em-field-head"><span class="em-label">${label}</span><span class="grow"></span>${val ? `<button class="btn sm" data-dcopy="${f}">Kopírovat</button>` : ''}</div>
+      ${multi ? `<div class="em-body" data-out="${f}">${esc(val) || '<span class="muted">—</span>'}</div>` : `<div class="em-value" data-out="${f}">${esc(val) || '<span class="muted">—</span>'}</div>`}
+    </div>`;
+  $('#view').innerHTML = `
+    <div class="page-head">
+      <div><a class="small muted" href="#/emaily" style="text-decoration:none">← EmailJoi</a>
+        <h1>${e.pinned ? '<span class="em-star">★</span> ' : ''}${esc(e.title || '(bez názvu)')}</h1>
+        <div class="sub">${e.category ? esc(e.category) + ' · ' : ''}${e.useCount ? `použito ${e.useCount}× · naposledy ${ago(e.lastUsed)}` : 'zatím nepoužito'}</div></div>
+      <div class="row">
+        <button class="btn sm ghost" id="ed-pin">${e.pinned ? '☆ Odepnout' : '★ Připnout'}</button>
+        <button class="btn sm ghost" id="ed-dup">⧉ Duplikovat</button>
+        <button class="btn sm ghost" id="ed-del">🗑 Smazat</button>
+        <button class="btn sm" id="ed-edit">✎ Upravit</button>
+      </div>
+    </div>
+    ${vars.length ? `<div class="card stack">
+      <div><h2>Doplň údaje</h2><div class="sub">Tyhle údaje se liší e-mail od e-mailu — doplní se do adresy, předmětu i textu.</div></div>
+      <div class="grid-2">${vars.map(v => `<label class="field"><span>${esc(v)}</span><input type="text" data-var="${esc(v)}" value="${esc(vals[v] || '')}"></label>`).join('')}</div>
+      <div class="row"><button class="btn sm ghost" id="ed-clear">Vymazat údaje</button></div>
+    </div>` : ''}
+    <div class="card stack em-detail">
+      ${field('to', 'Komu', x.to)}
+      ${e.cc || x.cc ? field('cc', 'Kopie', x.cc) : ''}
+      ${field('subject', 'Předmět', x.subject)}
+      ${field('body', 'Text', x.body, true)}
+      <div class="row em-bottom">
+        <button class="btn" id="ed-all">Kopírovat vše</button>
+        <a class="btn primary" id="ed-mailto" href="${esc(mailtoLink(x))}">✉ Otevřít v Mailu</a>
+      </div>
+    </div>
+    ${e.note ? `<div class="card"><h3 style="margin-top:0">Poznámka</h3><div class="small" style="white-space:pre-wrap">${esc(e.note)}</div></div>` : ''}`;
+  const cur = () => fillEmail(e, vals);
+  const refreshOut = () => {
+    const y = cur();
+    for (const f of ['to', 'cc', 'subject', 'body']) { const el = $(`[data-out="${f}"]`); if (el) el.textContent = y[f] || '—'; }
+    $('#ed-mailto').href = mailtoLink(y);
+  };
+  document.querySelectorAll('[data-var]').forEach(inp => inp.oninput = () => { vals[inp.dataset.var] = inp.value; refreshOut(); });
+  document.querySelectorAll('[data-dcopy]').forEach(b => b.onclick = () => { copyText(cur()[b.dataset.dcopy]); markUsed(id); });
+  $('#ed-all').onclick = () => { const y = cur(); copyText([`Komu: ${y.to}`, y.cc ? `Kopie: ${y.cc}` : '', `Předmět: ${y.subject}`, '', y.body].filter((l, i) => l || i === 3).join('\n')); markUsed(id); };
+  $('#ed-mailto').addEventListener('click', () => markUsed(id));
+  if ($('#ed-clear')) $('#ed-clear').onclick = () => { ui.emailVals[id] = {}; renderEmailDetail(id); };
+  $('#ed-edit').onclick = () => editEmail(id);
+  $('#ed-pin').onclick = () => act(async () => ok(await sb.from('email_templates').update({ pinned: !e.pinned }).eq('id', id)), e.pinned ? 'Odepnuto' : 'Připnuto ★');
+  $('#ed-dup').onclick = () => editEmail('', { ...e, title: e.title + ' (kopie)', pinned: false });
+  $('#ed-del').onclick = () => {
+    if (!confirm(`Smazat e-mail „${e.title}“?`)) return;
+    act(async () => ok(await sb.from('email_templates').delete().eq('id', id)), 'Smazáno').then(() => { if (!emailById(id)) location.hash = '#/emaily'; });
+  };
+}
+function editEmail(id, preset) {
+  const e = emailById(id) || preset || { id: '', title: '', category: ui.emailCat || '', to: '', cc: '', subject: '', body: '', note: '' };
+  const cats = emailCats();
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:720px">
+    <div class="modal-head"><h2>${id ? 'Upravit e-mail' : 'Nový e-mail'}</h2><button class="icon-btn" data-close>✕</button></div>
+    <div class="stack">
+      <div class="grid-2">
+        <label class="field"><span>Název *</span><input type="text" id="ee-title" value="${esc(e.title)}" placeholder="např. Objednávka palet – Gunreben"></label>
+        <label class="field"><span>Kategorie</span><input type="text" id="ee-category" list="ee-cats" value="${esc(e.category)}" placeholder="např. Dodavatelé, Dopravci, Zákazníci">
+          <datalist id="ee-cats">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist></label>
+        <label class="field"><span>Komu</span><input type="text" id="ee-to" value="${esc(e.to)}" placeholder="adresa@firma.cz (více oddělit čárkou)" autocapitalize="off" spellcheck="false"></label>
+        <label class="field"><span>Kopie (volitelné)</span><input type="text" id="ee-cc" value="${esc(e.cc)}" autocapitalize="off" spellcheck="false"></label>
+      </div>
+      <label class="field"><span>Předmět</span><input type="text" id="ee-subject" value="${esc(e.subject)}"></label>
+      <label class="field"><span>Text</span><textarea id="ee-body" style="min-height:240px">${esc(e.body)}</textarea></label>
+      <div class="small muted">Tip: co se mění, napiš do složených závorek — třeba <code>{číslo objednávky}</code> nebo <code>{jméno}</code>. Před kopírováním to jen doplníš. <code>{datum}</code> se doplní samo dnešním datem.</div>
+      <label class="field"><span>Poznámka pro tebe (nekopíruje se)</span><textarea id="ee-note" style="min-height:60px">${esc(e.note)}</textarea></label>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="ee-save">Uložit</button></div>
+  </div></div>`;
+  $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = closeModal);
+  $('#ee-title').focus();
+  $('#ee-save').onclick = async () => {
+    const g = k => $('#ee-' + k).value;
+    const row = { title: g('title').trim(), category: g('category').trim(), to_addr: g('to').trim(), cc: g('cc').trim(), subject: g('subject').trim(), body: g('body').replace(/\s+$/, ''), note: g('note').trim(), updated_at: new Date().toISOString() };
+    if (!row.title) return toast('Vyplň název');
+    closeModal();
+    const saved = await act(async () => id ? ok(await sb.from('email_templates').update(row).eq('id', id).select().single()) : ok(await sb.from('email_templates').insert(row).select().single()), 'Uloženo ✓');
+    if (saved && !id) location.hash = '#/emaily/e/' + saved.id;
+  };
+}
+
 // ---------- APLIKACE OBJEDNÁVKY ----------
 function syncNotices() {
   const sync = S.sync, m = S.settings.mapping || {};
@@ -286,7 +455,7 @@ function renderOrdersApp(tab) {
   const tabCount = { objednavky: c.todo, aufy: c.sentAufs, svozy: c.unshipped, dodavatele: S.suppliers.length };
   let html = `
     <div class="page-head">
-      <div><div class="eyebrow">Aplikace 01</div><h1>Objednávky od dodavatelů</h1></div>
+      <div><div class="eyebrow">Aplikace 01 · Objednávky od dodavatelů</div><h1>OrderJoi</h1></div>
       <div class="row">
         <span class="small muted">Shoptet: ${S.sync.error ? `<span style="color:var(--bad)">chyba</span>` : ago(S.sync.fetchedAt)}</span>
         <button class="btn" id="btn-sync">↻ Načíst ze Shoptetu</button>
@@ -349,6 +518,7 @@ function renderOrderDetail(code) {
   const groups = new Map();
   for (const i of open) if (effDec(i) === 'order' && effSup(i)) { const s = effSup(i); if (!groups.has(s)) groups.set(s, []); groups.get(s).push(i); }
   const locked = i => i.aufId && aufById(i.aufId)?.status !== 'draft';
+  const delCol = o.manual || its.some(i => i.manual);
   const supOptions = cur => `<option value="" ${!cur ? 'selected' : ''}>— dodavatel —</option>${S.suppliers.map(s => `<option value="${s.id}" ${cur === s.id ? 'selected' : ''}>${flag(s.country)} ${esc(s.name)}</option>`).join('')}<option value="__new">＋ Nový dodavatel…</option>`;
   $('#view').innerHTML = `
     <div class="page-head">
@@ -362,20 +532,20 @@ function renderOrderDetail(code) {
 
     <div class="card">
       <div class="card-head"><div><h2>Položky</h2><div class="sub">Zaškrtni, co objednáváš, a u koho. Dodavatel se u produktu zapamatuje pro příště.</div></div>
-        ${o.manual ? '<button class="btn sm" id="o-additem">＋ Přidat položku</button>' : ''}</div>
+        <button class="btn sm" id="o-additem">＋ Přidat položku</button></div>
       ${!its.length ? `<div class="empty">${o.manual ? 'Zatím žádné položky — přidej je tlačítkem „＋ Přidat položku“.' : 'Objednávka nemá položky ke zboží.'}</div>` : `
       <div class="table-wrap"><table class="items">
-        <thead><tr><th style="width:34px" title="Objednat">Obj.</th><th>Kód · MPN</th><th>Produkt</th><th class="num">Množství</th><th style="width:210px">Dodavatel</th>${o.manual ? '<th style="width:36px"></th>' : ''}</tr></thead>
+        <thead><tr><th style="width:34px" title="Objednat">Obj.</th><th>Kód · MPN</th><th>Produkt</th><th class="num">Množství</th><th style="width:210px">Dodavatel</th>${delCol ? '<th style="width:36px"></th>' : ''}</tr></thead>
         <tbody>${its.map(i => {
           const p = prod(i.code), dec = effDec(i), a = i.aufId ? aufById(i.aufId) : null;
           return `<tr class="${dec === 'skip' ? 'done' : ''}">
             <td><input type="checkbox" data-dec="${esc(i.key)}" ${dec === 'order' ? 'checked' : ''} ${locked(i) ? 'disabled' : ''} title="${dec === 'skip' ? 'Neobjednává se' : 'Objednat'}"></td>
             <td>${genCode(i.code) ? '<span class="muted small">bez kódu</span>' : `<code>${esc(i.code)}</code>`}${p.mpn ? `<div class="sub">MPN ${esc(p.mpn)}</div>` : ''}</td>
-            <td>${esc(i.name)}${enName(i.code) ? `<div class="sub">${esc(enName(i.code))}</div>` : ''}${!i.active && !i.manual ? '<div class="sub" style="color:var(--warn)">už není v objednávce ve Shoptetu</div>' : ''}</td>
+            <td>${esc(i.name)}${enName(i.code) ? `<div class="sub">${esc(enName(i.code))}</div>` : ''}${!i.active && !i.manual ? '<div class="sub" style="color:var(--warn)">už není v objednávce ve Shoptetu</div>' : ''}${i.manual && !o.manual ? '<div class="sub">přidáno ručně</div>' : ''}</td>
             <td class="num"><b>${fmtQty(i.qty)}</b> ${esc(i.unit)}</td>
             <td>${dec === 'skip' ? '<span class="muted small">neobjednává se</span>' : a
               ? `<span class="small">${flag(supplierById(a.supplierId)?.country)} ${esc(supName(a.supplierId))}</span><div class="sub">${a.aufNumber ? 'AUF ' + esc(a.aufNumber) : esc(AUF_STATE[a.status][0])}</div>`
-              : `<select data-isup="${esc(i.key)}">${supOptions(effSup(i))}</select>${!effSup(i) && p.shoptetSupplier ? `<div class="sub">Shoptet: ${esc(p.shoptetSupplier)}</div>` : ''}`}</td>${o.manual ? `<td>${i.manual && !i.aufId ? `<button class="icon-btn" data-delitem="${esc(i.key)}" title="Odebrat položku">🗑</button>` : ''}</td>` : ''}</tr>`;
+              : `<select data-isup="${esc(i.key)}">${supOptions(effSup(i))}</select>${!effSup(i) && p.shoptetSupplier ? `<div class="sub">Shoptet: ${esc(p.shoptetSupplier)}</div>` : ''}`}</td>${delCol ? `<td>${i.manual && !i.aufId ? `<button class="icon-btn" data-delitem="${esc(i.key)}" title="Odebrat položku">🗑</button>` : ''}</td>` : ''}</tr>`;
         }).join('')}</tbody></table></div>`}
     </div>
 
@@ -420,9 +590,14 @@ function bindOrderDetail(o) {
     });
   });
   V.querySelectorAll('[data-mkauf]').forEach(b => b.onclick = () => createAuf(o.code, b.dataset.mkauf));
+  $('#o-additem').onclick = () => addManualItems(o.code);
+  V.querySelectorAll('[data-delitem]').forEach(b => b.onclick = () => {
+    const it = S.items.find(i => i.key === b.dataset.delitem);
+    if (!confirm(`Odebrat položku ${it.name || it.code}?`)) return;
+    act(async () => ok(await sb.from('order_items').delete().eq('key', it.key)), 'Položka odebrána');
+  });
   if (!o.manual) return;
   $('#o-edit').onclick = () => editManualOrder(o.code);
-  $('#o-additem').onclick = () => addManualItems(o.code);
   if ($('#o-delete')) $('#o-delete').onclick = () => {
     if (!confirm(`Smazat ruční objednávku ${o.code} i s položkami a rozepsanými e-maily?`)) return;
     act(async () => {
@@ -430,11 +605,6 @@ function bindOrderDetail(o) {
       ok(await sb.from('orders').delete().eq('code', o.code));
     }, 'Objednávka smazána').then(() => { if (!orderByCode(o.code)) location.hash = '#/objednavky'; });
   };
-  V.querySelectorAll('[data-delitem]').forEach(b => b.onclick = () => {
-    const it = S.items.find(i => i.key === b.dataset.delitem);
-    if (!confirm(`Odebrat položku ${it.name || it.code}?`)) return;
-    act(async () => ok(await sb.from('order_items').delete().eq('key', it.key)), 'Položka odebrána');
-  });
 }
 
 // --- ruční objednávka (mimo Shoptet)
@@ -476,15 +646,18 @@ function readItemRows() {
 }
 async function saveManualItems(orderCode, rows, date, customer) {
   const now = new Date().toISOString();
-  const taken = new Set(S.items.filter(i => i.orderCode === orderCode).map(i => i.key));
-  const items = [], newProds = [];
+  // stejný produkt může být v objednávce kolikrát chceš → klíč dostane pořadové číslo
+  // (u objednávek ze Shoptetu vždy, aby se ruční řádek nepletl s řádkem ze Shoptetu)
+  const taken = new Set(S.items.map(i => i.key));
+  const shoptet = !orderByCode(orderCode)?.manual;
+  const items = [], newProds = [], prodSeen = new Set();
   for (const r of rows) {
     let code = r.code || r.mpn;
     if (!code) code = 'M-' + Math.random().toString(36).slice(2, 8).toUpperCase();
     let key = orderCode + '|' + code;
-    if (taken.has(key)) throw new Error(`Položka ${code} už v objednávce je`);
+    for (let n = shoptet ? 1 : 2; shoptet || taken.has(key); n++) { key = `${orderCode}|${code}#${n}`; if (!taken.has(key)) break; }
     taken.add(key);
-    if (!S.products[code]) newProds.push({ code, name: r.name, supplier_code: r.mpn && r.mpn !== code ? r.mpn : '', updated_at: now });
+    if (!S.products[code] && !prodSeen.has(code) && prodSeen.add(code)) newProds.push({ code, name: r.name, supplier_code: r.mpn && r.mpn !== code ? r.mpn : '', updated_at: now });
     items.push({ key, order_code: orderCode, code, name: r.name, qty: r.qty, unit: r.unit, order_date: date || '', customer: customer || '', active: true, manual: true, decision: 'order', first_seen: now, last_seen: now });
   }
   if (newProds.length) ok(await sb.from('products').upsert(newProds, { onConflict: 'code', ignoreDuplicates: true }));
@@ -526,18 +699,28 @@ function editManualOrder(code) {
       }, 'Uloženo ✓');
     }
     const newCode = $('#mo-code').value.trim(), note = $('#mo-note').value.trim();
-    let rows;
+    let rows, exists = false;
     try {
       if (!newCode) throw new Error('Vyplň číslo / referenci objednávky');
       if (/[|/#?]/.test(newCode)) throw new Error('Číslo objednávky nesmí obsahovat znaky | / # ?');
       rows = readItemRows();
       const { data: ex } = await sb.from('orders').select('code,manual').eq('code', newCode).maybeSingle();
-      if (ex || orderByCode(newCode)) throw new Error(`Objednávka ${newCode} už v SmartJoi je`);
+      exists = !!(ex || orderByCode(newCode));
     } catch (e) { return toast(e.message); }
+    // objednávka s tímhle číslem už existuje → položky se přidají do ní
+    if (exists && !confirm(`Objednávka ${newCode} už v SmartJoi je. Přidat položky do ní?`)) return;
     closeModal();
+    if (exists) {
+      const o = orderByCode(newCode) || {};
+      await act(() => saveManualItems(newCode, rows, o.date || date, o.customer || customer), rows.length ? 'Položky přidány ✓' : '');
+      location.hash = '#/objednavky/o/' + encodeURIComponent(newCode);
+      return;
+    }
     await act(async () => {
       ok(await sb.from('orders').insert({ code: newCode, order_date: date, customer, note, manual: true, active: true, shoptet_status: '' }));
-      await saveManualItems(newCode, rows, date, customer);
+      S.orders.push({ code: newCode, manual: true });
+      try { await saveManualItems(newCode, rows, date, customer); }
+      catch (e) { await sb.from('orders').delete().eq('code', newCode); throw e; } // nic nezůstane napůl
     }, 'Objednávka vytvořena ✓');
     if (orderByCode(newCode)) location.hash = '#/objednavky/o/' + encodeURIComponent(newCode);
   };
