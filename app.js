@@ -16,7 +16,7 @@ const COUNTRIES = [
   ['SI', 'Slovinsko'], ['CN', 'Čína'], ['GB', 'Velká Británie'], ['CZ', 'Česko'],
 ];
 const MAP_LABELS = {
-  orderCode: 'Číslo objednávky', status: 'Stav objednávky', itemCode: 'Kód položky', itemName: 'Název položky',
+  orderCode: 'Číslo objednávky', status: 'Stav objednávky', itemCode: 'Kód položky', itemName: 'Název položky', itemVariant: 'Varianta',
   itemAmount: 'Množství', itemUnit: 'Jednotka', itemType: 'Typ položky (doprava/platba se přeskočí)', date: 'Datum', customer: 'Zákazník',
 };
 const TABS = [
@@ -85,9 +85,9 @@ async function loadState() {
     sb.from('batches').select('*').order('created_at', { ascending: false }).limit(200).then(ok),
   ]);
   const products = {};
-  for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name };
+  for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name, nameEn: p.name_en || '', nameEnSrc: p.name_en_src || '', mpn: p.mpn || '', shoptetSupplier: p.shoptet_supplier || '' };
   S = {
-    settings: { csvUrl: st.csv_url, statusValue: st.status_value, mapping: st.mapping || {}, companyName: st.company_name, subjectTemplate: st.subject_template, extraNote: st.extra_note, signature: st.signature },
+    settings: { csvUrl: st.csv_url, statusValue: st.status_value, mapping: st.mapping || {}, companyName: st.company_name, subjectTemplate: st.subject_template, extraNote: st.extra_note, signature: st.signature, productsCsvUrl: st.products_csv_url || '', productsSyncInfo: st.products_sync_info || {}, deeplKey: st.deepl_api_key || '', translateInfo: st.translate_info || {} },
     suppliers: sups.map(s => ({ id: s.id, name: s.name, country: s.country, email: s.email, contact: s.contact, customerNo: s.customer_no, notes: s.notes })),
     products,
     items: items.map(i => ({ key: i.key, orderCode: i.order_code, code: i.code, name: i.name, qty: Number(i.qty), unit: i.unit, date: i.order_date, customer: i.customer, ordered: i.ordered_at ? { at: i.ordered_at, batchId: i.batch_id } : null })),
@@ -99,11 +99,14 @@ async function loadState() {
 async function requestSync() {
   const snap = async () => ok(await sb.from('settings').select('last_sync_at,last_sync_error_at').eq('id', 1).single());
   const before = await snap();
-  ok(await sb.rpc('request_shoptet_sync'));
+  ok(await sb.rpc('request_shoptet_sync', { task: 'orders' }));
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 3000));
     const now = await snap();
-    if (now.last_sync_at !== before.last_sync_at || now.last_sync_error_at !== before.last_sync_error_at) return;
+    if (now.last_sync_at !== before.last_sync_at || now.last_sync_error_at !== before.last_sync_error_at) {
+      sb.rpc('request_shoptet_sync', { task: 'products' }).then(() => {}, () => {}); // MPN + dodavatelé na pozadí
+      return;
+    }
   }
   throw new Error('Shoptet neodpověděl do 90 s, zkus to za chvíli znovu.');
 }
@@ -115,7 +118,7 @@ async function dispatch(method, url, b = {}) {
   if (url === '/api/settings') {
     // last_sync_at: null → funkce se hned spustí znovu i s novým stavem / sloupci / odkazem
     ok(await sb.from('settings').update({
-      csv_url: b.csvUrl, status_value: b.statusValue, mapping: b.mapping, company_name: b.companyName,
+      csv_url: b.csvUrl, products_csv_url: b.productsCsvUrl, deepl_api_key: (b.deeplKey || '').trim(), status_value: b.statusValue, mapping: b.mapping, company_name: b.companyName,
       subject_template: b.subjectTemplate, extra_note: b.extraNote, signature: b.signature, last_sync_at: null,
     }).eq('id', 1));
     return requestSync();
@@ -157,6 +160,9 @@ async function api(method, url, body) {
 // ---------- derived ----------
 const supplierById = id => S.suppliers.find(s => s.id === id);
 const prod = code => S.products[code] || {};
+// co jde do e-mailu: ručně zadané údaje mají přednost, jinak MPN / automatický překlad
+const supCode = code => prod(code).supplierCode || prod(code).mpn || code;
+const enName = code => prod(code).supplierName || prod(code).nameEn || '';
 function openItems() { return S.items.filter(i => !i.ordered); }
 function groupsToOrder() {
   const groups = new Map(); // supplierId -> products map
@@ -292,14 +298,14 @@ function tabToOrder() {
   // nepřiřazené
   const un = groups.get('');
   if (un) {
-    h += `<div class="group"><div class="group-head"><span class="flag">❓</span><h2 class="grow">Bez dodavatele</h2><span class="badge bad">${un.size} produktů</span></div>
+    h += `<div class="group"><div class="group-head"><span class="flag">❓</span><h2 class="grow">Bez dodavatele</h2><span class="badge bad">${un.size} ${un.size === 1 ? 'produkt' : un.size < 5 ? 'produkty' : 'produktů'}</span></div>
       <div class="group-body"><p class="small muted" style="margin:10px 0 4px">Přiřaď produkt k dodavateli — aplikace si to zapamatuje pro další objednávky.</p>
       <div class="table-wrap"><table><thead><tr><th>Produkt</th><th class="num">Množství</th><th class="hide-m">Objednávky</th><th style="width:230px">Dodavatel</th></tr></thead><tbody>
       ${[...un.values()].map(p => `<tr>
         <td><code>${esc(p.code)}</code><div class="sub">${esc(p.name)}</div></td>
         <td class="num">${fmtQty(p.qty)} ${esc(p.unit)}</td>
         <td class="hide-m small muted">${p.items.map(i => esc(i.orderCode)).join(', ')}</td>
-        <td>${supplierSelect(p.code, '')}</td></tr>`).join('')}
+        <td>${supplierSelect(p.code, '')}${prod(p.code).shoptetSupplier ? `<div class="sub" style="margin-top:4px">Shoptet: ${esc(prod(p.code).shoptetSupplier)}</div>` : ''}</td></tr>`).join('')}
       </tbody></table></div></div></div>`;
   }
 
@@ -315,13 +321,13 @@ function tabToOrder() {
         <span class="badge warn">${g.size} ${g.size === 1 ? 'produkt' : g.size < 5 ? 'produkty' : 'produktů'}</span>
         <button class="btn primary" data-email="${sid}">✉ Připravit e-mail</button>
       </div><div class="group-body"><div class="table-wrap"><table>
-        <thead><tr><th style="width:30px"><input type="checkbox" checked data-all="${sid}"></th><th>Kód dodavatele</th><th>Produkt</th><th class="num">Množství</th><th class="hide-m">Objednávky</th><th></th></tr></thead><tbody>
+        <thead><tr><th style="width:30px"><input type="checkbox" checked data-all="${sid}"></th><th>Kód (MPN)</th><th>Produkt (EN)</th><th class="num">Množství</th><th class="hide-m">Objednávky</th><th></th></tr></thead><tbody>
         ${[...g.values()].map(p => {
           const pr = prod(p.code);
           return `<tr>
           <td><input type="checkbox" checked data-pick="${sid}" value="${esc(p.code)}"></td>
-          <td><code>${esc(pr.supplierCode || p.code)}</code>${pr.supplierCode ? `<div class="sub">náš: ${esc(p.code)}</div>` : ''}</td>
-          <td>${esc(pr.supplierName || p.name)}${pr.supplierName ? `<div class="sub">${esc(p.name)}</div>` : ''}</td>
+          <td><code>${esc(supCode(p.code))}</code>${supCode(p.code) !== p.code ? `<div class="sub">náš: ${esc(p.code)}</div>` : ''}</td>
+          <td>${enName(p.code) ? esc(enName(p.code)) + (!pr.supplierName && pr.nameEnSrc ? ' <span class="badge" title="Přeloženo automaticky" style="padding:0 6px;font-size:10px">auto</span>' : '') : '<span class="muted">—</span>'}<div class="sub">${esc(p.name)}</div></td>
           <td class="num"><b>${fmtQty(p.qty)}</b> ${esc(p.unit)}</td>
           <td class="hide-m small muted">${p.items.map(i => esc(i.orderCode) + (p.items.length > 1 ? ` (${fmtQty(i.qty)})` : '')).join(', ')}</td>
           <td><button class="icon-btn" title="Upravit produkt" data-editprod="${esc(p.code)}">✎</button></td></tr>`;
@@ -369,17 +375,17 @@ function tabOrders() {
 function tabProducts() {
   const q = ui.search.trim().toLowerCase();
   const all = Object.entries(S.products).sort((a, b) => a[0].localeCompare(b[0], 'cs'));
-  const list = all.filter(([code, p]) => !q || (code + ' ' + (p.name || '') + ' ' + (p.supplierCode || '') + ' ' + (p.supplierName || '')).toLowerCase().includes(q));
+  const list = all.filter(([code, p]) => !q || (code + ' ' + (p.name || '') + ' ' + (p.supplierCode || '') + ' ' + (p.supplierName || '') + ' ' + (p.mpn || '') + ' ' + (p.nameEn || '')).toLowerCase().includes(q));
   return `<div class="card">
-    <div class="card-head"><div><h2>Produkty</h2><div class="sub">Přiřazení dodavatele a údaje, které se použijí v e-mailu (kód a anglický název u dodavatele).</div></div>
+    <div class="card-head"><div><h2>Produkty</h2><div class="sub">Přiřazení dodavatele a údaje do e-mailu. MPN se načítá z exportu produktů ze Shoptetu, anglický název se překládá automaticky — obojí můžeš přes ✎ přepsat.</div></div>
       <input type="search" id="prod-search" placeholder="Hledat kód nebo název…" value="${esc(ui.search)}" style="max-width:280px"></div>
     ${!all.length ? '<div class="empty">Produkty se tu objeví automaticky, jakmile přijdou v objednávkách.</div>' : `
-    <div class="table-wrap"><table><thead><tr><th>Náš kód / název</th><th style="width:220px">Dodavatel</th><th class="hide-m">Kód u dodavatele</th><th class="hide-m">Název pro dodavatele (EN)</th><th></th></tr></thead><tbody>
+    <div class="table-wrap"><table><thead><tr><th>Náš kód / název</th><th style="width:220px">Dodavatel</th><th class="hide-m">MPN / kód dodavatele</th><th class="hide-m">Název EN</th><th></th></tr></thead><tbody>
     ${list.slice(0, 400).map(([code, p]) => `<tr>
       <td><code>${esc(code)}</code><div class="sub">${esc(p.name)}</div></td>
-      <td>${supplierSelect(code, p.supplierId || '')}</td>
-      <td class="hide-m small">${p.supplierCode ? `<code>${esc(p.supplierCode)}</code>` : '<span class="muted">—</span>'}</td>
-      <td class="hide-m small">${p.supplierName ? esc(p.supplierName) : '<span class="muted">—</span>'}</td>
+      <td>${supplierSelect(code, p.supplierId || '')}${p.shoptetSupplier ? `<div class="sub" style="margin-top:4px">Shoptet: ${esc(p.shoptetSupplier)}</div>` : ''}</td>
+      <td class="hide-m small">${supCode(code) !== code ? `<code>${esc(supCode(code))}</code>` : '<span class="muted">—</span>'}</td>
+      <td class="hide-m small">${enName(code) ? esc(enName(code)) : '<span class="muted">—</span>'}</td>
       <td><button class="icon-btn" data-editprod="${esc(code)}">✎</button></td></tr>`).join('')}
     </tbody></table></div>${list.length > 400 ? `<p class="small muted">Zobrazeno 400 z ${list.length} — upřesni hledání.</p>` : ''}`}
   </div>`;
@@ -429,7 +435,11 @@ function tabSettings() {
   return `
   <div class="card stack">
     <div><h2>Napojení na Shoptet</h2><div class="sub">CSV export objednávek z administrace Shoptetu. Aplikace ho sama stahuje v nastaveném intervalu.</div></div>
-    <label class="field"><span>Odkaz na CSV export</span><input type="url" id="s-csvUrl" value="${esc(st.csvUrl)}"></label>
+    <label class="field"><span>Odkaz na CSV export objednávek</span><input type="url" id="s-csvUrl" value="${esc(st.csvUrl)}"></label>
+    <label class="field"><span>Odkaz na export produktů — MPN a dodavatel (XML productsComplete nebo CSV)</span><input type="url" id="s-productsCsvUrl" placeholder="https://www.vinylor.cz/export/products.csv?…" value="${esc(st.productsCsvUrl)}"></label>
+    ${(() => { const i = st.productsSyncInfo || {}; if (!st.productsCsvUrl) return ''; if (!i.at) return '<div class="small muted">Export produktů se načte při dalším načtení ze Shoptetu.</div>';
+      return i.error ? `<div class="small" style="color:var(--bad)">Export produktů: ${esc(i.error)}${i.headers ? ` <span class="muted">(sloupce: ${esc(i.headers.join(', '))})</span>` : ''}</div>`
+        : `<div class="small muted">Export produktů: ${fmtDate(i.at)} · ${i.rows} produktů/variant · MPN z <code>${esc(i.mpnCol)}</code> · změněno ${i.updated} · automaticky přiřazeno k dodavateli ${i.assigned || 0}</div>`; })()}
     <div class="grid-2">
       <label class="field"><span>Stav objednávky, který znamená „objednat“</span>
         <input type="text" id="s-statusValue" list="statuses" value="${esc(st.statusValue)}">
@@ -455,6 +465,11 @@ function tabSettings() {
       <label class="field"><span>Název firmy</span><input type="text" id="s-companyName" value="${esc(st.companyName)}"></label>
       <label class="field"><span>Předmět</span><input type="text" id="s-subjectTemplate" value="${esc(st.subjectTemplate)}"></label>
     </div>
+    <label class="field"><span>Klíč DeepL API (volitelné — lepší překlad názvů; bez něj se použije bezplatný MyMemory)</span>
+      <input type="text" id="s-deeplKey" autocomplete="off" spellcheck="false" placeholder="např. 1a2b3c4d-…:fx" value="${esc(st.deeplKey)}"></label>
+    ${(() => { const t = st.translateInfo || {}; if (!t.at) return '';
+      return t.error ? `<div class="small" style="color:var(--bad)">Překlad (${esc(t.provider)}): ${esc(t.error)} · ${fmtDate(t.at)}</div>`
+        : `<div class="small muted">Poslední překlad: ${esc(t.provider === 'deepl' ? 'DeepL' : 'MyMemory')} · ${t.done} názvů · ${fmtDate(t.at)}</div>`; })()}
     <label class="field"><span>Doplňující věta (volitelné, EN)</span><textarea id="s-extraNote" placeholder="e.g. Please deliver to our warehouse in …">${esc(st.extraNote)}</textarea></label>
     <label class="field"><span>Podpis</span><textarea id="s-signature">${esc(st.signature)}</textarea></label>
   </div>
@@ -470,11 +485,13 @@ function buildEmail(sid, codes, includeRefs) {
   const date = new Date().toLocaleDateString('en-GB');
   const subject = (st.subjectTemplate || 'Purchase order – {company} – {date}')
     .replaceAll('{company}', st.companyName || '').replaceAll('{date}', date).replaceAll('{supplier}', s.name);
+  // stejné MPN u více řádků (např. délkové varianty) → přidej i náš kód, ať je to jednoznačné
+  const mpnCount = {}; for (const p of picked) { const c = supCode(p.code); mpnCount[c] = (mpnCount[c] || 0) + 1; }
   const lines = picked.map((p, i) => {
     const pr = prod(p.code);
-    const code = pr.supplierCode || p.code;
+    const code = supCode(p.code);
     // do e-mailu jde jen anglický název; bez něj pouze kód (české názvy dodavatel nezná)
-    let l = `${i + 1}. ${code}${pr.supplierName ? ' – ' + pr.supplierName : ''} – ${fmtQtyEn(p.qty)} ${unitEn(p.unit)}`;
+    let l = `${i + 1}. ${code}${mpnCount[code] > 1 && code !== p.code ? ` (${p.code})` : ''}${enName(p.code) ? ' – ' + enName(p.code) : ''} – ${fmtQtyEn(p.qty)} ${unitEn(p.unit)}`;
     if (includeRefs) l += `  (ref.: ${p.items.map(x => x.orderCode).join(', ')})`;
     return l;
   });
@@ -490,7 +507,7 @@ function buildEmail(sid, codes, includeRefs) {
   ].join('\n');
   return {
     to: s.email || '', subject, body,
-    lines: picked.map(p => ({ code: prod(p.code).supplierCode || p.code, ourCode: p.code, name: prod(p.code).supplierName || p.name, qty: p.qty, unit: p.unit })),
+    lines: picked.map(p => ({ code: supCode(p.code), ourCode: p.code, name: enName(p.code) || p.name, qty: p.qty, unit: p.unit })),
     keys: picked.flatMap(p => p.items.map(i => i.key)),
   };
 }
@@ -504,7 +521,11 @@ function openEmail(sid) {
     $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal">
       <div class="modal-head"><h2>✉ Objednávka · ${flag(s.country)} ${esc(s.name)}</h2><button class="icon-btn" data-close>✕</button></div>
       ${!s.email ? `<div class="notice warn">Dodavatel nemá vyplněný e-mail. Doplň ho v záložce Dodavatelé.</div>` : ''}
-      ${(() => { const n = codes.filter(c => !prod(c).supplierName).length; return n ? `<div class="notice">U ${n} ${n === 1 ? 'produktu' : 'produktů'} chybí anglický název, v e-mailu je proto jen kód. Doplníš ho přes ✎ u produktu — příště už se použije automaticky.</div>` : ''; })()}
+      ${(() => {
+        const miss = codes.filter(c => !enName(c)).length, auto = codes.filter(c => !prod(c).supplierName && prod(c).nameEn).length;
+        return (miss ? `<div class="notice">U ${miss} ${miss === 1 ? 'produktu' : 'produktů'} zatím chybí anglický název (překlad proběhne při dalším načtení), v e-mailu je jen kód.</div>` : '')
+          + (auto ? `<div class="notice">Názvy jsou přeložené automaticky — před odesláním je rychle projeď. Opravu stačí udělat jednou přes ✎ u produktu.</div>` : '');
+      })()}
       <div class="stack">
         <label class="field"><span>Komu</span><div class="copy-box"><input type="text" id="m-to" value="${esc(mail.to)}"><button class="btn sm" data-mcopy="m-to">Kopírovat</button></div></label>
         <label class="field"><span>Předmět</span><div class="copy-box"><input type="text" id="m-subject" value="${esc(mail.subject)}"><button class="btn sm" data-mcopy="m-subject">Kopírovat</button></div></label>
@@ -531,7 +552,7 @@ function closeModal() { $('#modal-root').innerHTML = ''; }
 
 // ---------- supplier / product modals ----------
 function editSupplier(id, thenAssignCode) {
-  const s = supplierById(id) || { id: '', name: '', country: 'DE', email: '', contact: '', customerNo: '', notes: '' };
+  const s = supplierById(id) || { id: '', name: (thenAssignCode && prod(thenAssignCode).shoptetSupplier) || '', country: 'DE', email: '', contact: '', customerNo: '', notes: '' };
   $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal">
     <div class="modal-head"><h2>${s.id ? 'Upravit dodavatele' : 'Nový dodavatel'}</h2><button class="icon-btn" data-close>✕</button></div>
     <div class="stack">
@@ -558,6 +579,12 @@ function editSupplier(id, thenAssignCode) {
       const created = S.suppliers.find(x => !before.has(x.id));
       if (created) await api('PUT', '/api/products', { code: thenAssignCode, data: { supplierId: created.id } });
     }
+    // produkty bez dodavatele, které mají ve Shoptetu dodavatele se stejným názvem → přiřadit
+    const target = S.suppliers.find(x => x.name === data.name) ;
+    if (target) {
+      const { data: rows } = await sb.from('products').update({ supplier_id: target.id }).is('supplier_id', null).eq('skip', false).ilike('shoptet_supplier', data.name).select('code');
+      if (rows?.length) { await api('GET', '/api/state'); toast(`Přiřazeno ${rows.length} produktů podle Shoptetu ✓`); }
+    }
     closeModal(); toast('Uloženo ✓'); render();
   };
 }
@@ -569,9 +596,10 @@ function editProduct(code) {
     <p class="muted small" style="margin-top:0">${esc(p.name)}</p>
     <div class="stack">
       <label class="field"><span>Dodavatel</span>${supplierSelect(code, p.supplierId || '', 'no-auto').replace('<option value="__new">＋ Nový dodavatel…</option>', '')}</label>
-      <label class="field"><span>Kód produktu u dodavatele</span><input type="text" id="p-supplierCode" placeholder="${esc(code)}" value="${esc(p.supplierCode)}"></label>
-      <label class="field"><span>Název produktu pro dodavatele (anglicky)</span><input type="text" id="p-supplierName" placeholder="${esc(p.name)}" value="${esc(p.supplierName)}"></label>
-      <div class="small muted">Prázdná pole = v e-mailu se použije náš kód a název ze Shoptetu.</div>
+      <div class="small muted">MPN ze Shoptetu: ${p.mpn ? `<code>${esc(p.mpn)}</code>` : '—'}</div>
+      <label class="field"><span>Kód do e-mailu (prázdné = MPN, jinak náš kód)</span><input type="text" id="p-supplierCode" placeholder="${esc(p.mpn || code)}" value="${esc(p.supplierCode)}"></label>
+      <label class="field"><span>Název pro dodavatele (anglicky)</span><input type="text" id="p-supplierName" placeholder="${esc(p.nameEn || 'Anglický název')}" value="${esc(p.supplierName || p.nameEn)}"></label>
+      
     </div>
     <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="p-save">Uložit</button></div>
   </div></div>`;
@@ -579,7 +607,9 @@ function editProduct(code) {
   $('#p-save').onclick = async () => {
     await api('PUT', '/api/products', { code, data: {
       supplierId: $('#modal-root select').value,
-      supplierCode: $('#p-supplierCode').value.trim(), supplierName: $('#p-supplierName').value.trim(),
+      supplierCode: $('#p-supplierCode').value.trim(),
+      // uloží se jen ruční úprava; stejný text jako automatický překlad se neukládá
+      supplierName: (v => v === (p.nameEn || '') ? '' : v)($('#p-supplierName').value.trim()),
     } });
     closeModal(); toast('Uloženo ✓'); render();
   };
@@ -616,7 +646,7 @@ function bind() {
   const ss = $('#save-settings');
   if (ss) ss.onclick = async () => {
     const data = { mapping: { ...S.settings.mapping } };
-    for (const k of ['csvUrl', 'statusValue', 'companyName', 'subjectTemplate', 'extraNote', 'signature']) data[k] = $('#s-' + k).value;
+    for (const k of ['csvUrl', 'productsCsvUrl', 'deeplKey', 'statusValue', 'companyName', 'subjectTemplate', 'extraNote', 'signature']) data[k] = $('#s-' + k).value;
     V.querySelectorAll('[data-map]').forEach(sel => data.mapping[sel.dataset.map] = sel.value);
     ss.disabled = true; ss.textContent = 'Ukládám…';
     await api('PUT', '/api/settings', data); toast('Nastavení uloženo ✓'); render();
