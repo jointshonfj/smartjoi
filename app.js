@@ -5,11 +5,8 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
 let busy = false;
-const ui = { search: '', showNone: false, includeRefs: false, histOpen: {} };
+const ui = { search: '', orderFilter: 'active', aufFilter: 'sent', docs: {}, includeRefs: false, showPast: false };
 
-const APPS = [
-  { id: 'objednavky', icon: '📦', title: 'Objednávky od dodavatelů', desc: 'Položky z Shoptetu ve stavu „Potřeba objednat“ — co objednat, u koho, a hotový e-mail v angličtině.' },
-];
 const COUNTRIES = [
   ['DE', 'Německo'], ['AT', 'Rakousko'], ['PL', 'Polsko'], ['SK', 'Slovensko'], ['IT', 'Itálie'], ['NL', 'Nizozemsko'],
   ['BE', 'Belgie'], ['FR', 'Francie'], ['ES', 'Španělsko'], ['DK', 'Dánsko'], ['SE', 'Švédsko'], ['HU', 'Maďarsko'],
@@ -20,9 +17,19 @@ const MAP_LABELS = {
   itemAmount: 'Množství', itemUnit: 'Jednotka', itemType: 'Typ položky (doprava/platba se přeskočí)', date: 'Datum', customer: 'Zákazník',
 };
 const TABS = [
-  ['k-objednani', 'K objednání'], ['objednavky', 'Objednávky'], ['produkty', 'Produkty'],
-  ['dodavatele', 'Dodavatelé'], ['historie', 'Historie'], ['nastaveni', 'Nastavení'],
+  ['objednavky', 'Objednávky'], ['aufy', 'AUFy'], ['svozy', 'Svozy'],
+  ['produkty', 'Produkty'], ['dodavatele', 'Dodavatelé'], ['nastaveni', 'Nastavení'],
 ];
+// stav objednávky v SmartJoi (od ruky ze Shoptetu až po svoz)
+const STATE = {
+  todo:      ['Potřeba objednat', 'warn', 1],
+  waiting:   ['Čeká na AUF', 'info', 2],
+  confirmed: ['AUF potvrzen · bez svozu', 'ok', 3],
+  shipping:  ['Ve svozu', 'ok', 4],
+  none:      ['Nic k objednání', '', 5],
+  empty:     ['Bez položek', '', 6],
+};
+const AUF_STATE = { draft: ['Koncept e-mailu', ''], sent: ['Odesláno · čeká na AUF', 'info'], confirmed: ['AUF potvrzen', 'ok'] };
 
 // ---------- helpers ----------
 const $ = s => document.querySelector(s);
@@ -31,11 +38,16 @@ const flag = cc => cc && /^[A-Z]{2}$/.test(cc) ? String.fromCodePoint(...[...cc]
 const countryName = cc => (COUNTRIES.find(c => c[0] === cc) || [cc, cc || '—'])[1];
 const fmtQty = n => (Math.round(n * 1000) / 1000).toLocaleString('cs-CZ');
 const fmtQtyEn = n => String(Math.round(n * 1000) / 1000);
+const eur = n => n == null || n === '' || isNaN(n) ? '—' : Number(n).toLocaleString('cs-CZ', { style: 'currency', currency: 'EUR' });
+const parseEur = s => { const t = String(s ?? '').replace(/\s|€|eur/gi, '').replace(/\.(?=\d{3}(\D|$))/g, '').replace(',', '.'); const n = parseFloat(t); return Number.isFinite(n) ? Math.round(n * 100) / 100 : null; };
+const todayIso = () => new Date().toISOString().slice(0, 10);
+const plural = (n, a, b, c) => `${n} ${n === 1 ? a : n > 1 && n < 5 ? b : c}`;
 function fmtDate(iso, withTime = true) {
   if (!iso) return '—';
   const d = new Date(iso); if (isNaN(d)) return iso;
   return d.toLocaleString('cs-CZ', withTime ? { day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' } : { day: 'numeric', month: 'numeric', year: 'numeric' });
 }
+const fmtDay = d => d ? new Date(d + 'T12:00:00').toLocaleDateString('cs-CZ', { weekday: 'short', day: 'numeric', month: 'numeric', year: 'numeric' }) : 'bez data';
 function ago(iso) {
   if (!iso) return 'nikdy';
   const s = Math.round((Date.now() - Date.parse(iso)) / 1000);
@@ -46,27 +58,24 @@ function ago(iso) {
 }
 function unitEn(u) {
   const x = String(u || '').trim().toLowerCase().replace('.', '');
-  const M = { ks: 'pcs', kus: 'pcs', kusů: 'pcs', kusy: 'pcs', pcs: 'pcs', m2: 'm²', 'm²': 'm²', bm: 'lm', m: 'm', bal: 'pack(s)', balení: 'pack(s)', bal_: 'pack(s)', kg: 'kg', t: 't', l: 'l', pár: 'pair(s)', sada: 'set(s)', sad: 'set(s)', krab: 'box(es)', krabice: 'box(es)', role: 'roll(s)', paleta: 'pallet(s)' };
+  const M = { ks: 'pcs', kus: 'pcs', kusů: 'pcs', kusy: 'pcs', pcs: 'pcs', m2: 'm²', 'm²': 'm²', bm: 'lm', m: 'm', bal: 'pack(s)', balení: 'pack(s)', kg: 'kg', t: 't', l: 'l', pár: 'pair(s)', sada: 'set(s)', sad: 'set(s)', krab: 'box(es)', krabice: 'box(es)', role: 'roll(s)', paleta: 'pallet(s)' };
   return M[x] || (u ? u : 'pcs');
 }
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 1800);
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2000);
 }
 async function copyText(text) {
-  try {
-    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return toast('Zkopírováno ✓'); }
-  } catch {}
-  // záloha pro http:// v lokální síti (telefon)
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return toast('Zkopírováno ✓'); } } catch {}
   const ta = document.createElement('textarea');
   ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;font-size:16px';
   document.body.appendChild(ta); ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
-  let ok = false; try { ok = document.execCommand('copy'); } catch {}
-  ta.remove();
-  toast(ok ? 'Zkopírováno ✓' : 'Označ text a zkopíruj ručně');
+  let okc = false; try { okc = document.execCommand('copy'); } catch {}
+  ta.remove(); toast(okc ? 'Zkopírováno ✓' : 'Označ text a zkopíruj ručně');
 }
+const fmtSize = b => b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1e3)) + ' kB';
 
-// ---------- Supabase data layer ----------
+// ---------- data ----------
 const ok = ({ data, error }) => { if (error) throw new Error(error.message); return data; };
 async function fetchAll(table, build = q => q) {
   const out = [];
@@ -77,25 +86,38 @@ async function fetchAll(table, build = q => q) {
   }
 }
 async function loadState() {
-  const [st, sups, prods, items, batches] = await Promise.all([
+  const since = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const [st, sups, prods, orders, items, aufs, ships, events] = await Promise.all([
     sb.from('settings').select('*').eq('id', 1).single().then(ok),
     fetchAll('suppliers', q => q.order('name')),
     fetchAll('products', q => q.order('code')),
-    fetchAll('order_items', q => q.eq('active', true).order('order_code')),
-    sb.from('batches').select('*').order('created_at', { ascending: false }).limit(200).then(ok),
+    fetchAll('orders', q => q.order('code', { ascending: false })),
+    fetchAll('order_items', q => q.order('key')),
+    fetchAll('aufs', q => q.order('created_at', { ascending: false })),
+    fetchAll('shipments', q => q.order('ship_date')),
+    sb.from('calendar_events').select('*').gte('starts_on', since).order('starts_on').limit(200).then(ok),
   ]);
   const products = {};
   for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name, nameEn: p.name_en || '', nameEnSrc: p.name_en_src || '', mpn: p.mpn || '', shoptetSupplier: p.shoptet_supplier || '' };
   S = {
-    settings: { csvUrl: st.csv_url, statusValue: st.status_value, mapping: st.mapping || {}, companyName: st.company_name, subjectTemplate: st.subject_template, extraNote: st.extra_note, signature: st.signature, productsCsvUrl: st.products_csv_url || '', productsSyncInfo: st.products_sync_info || {}, deeplKey: st.deepl_api_key || '', translateInfo: st.translate_info || {} },
+    settings: { csvUrl: st.csv_url, statusValue: st.status_value, mapping: st.mapping || {}, companyName: st.company_name, subjectTemplate: st.subject_template, extraNote: st.extra_note, signature: st.signature, productsCsvUrl: st.products_csv_url || '', productsSyncInfo: st.products_sync_info || {}, deeplKey: st.deepl_api_key || '', translateInfo: st.translate_info || {}, calendarToken: st.calendar_token || '' },
     suppliers: sups.map(s => ({ id: s.id, name: s.name, country: s.country, email: s.email, contact: s.contact, customerNo: s.customer_no, notes: s.notes })),
     products,
-    items: items.map(i => ({ key: i.key, orderCode: i.order_code, code: i.code, name: i.name, qty: Number(i.qty), unit: i.unit, date: i.order_date, customer: i.customer, ordered: i.ordered_at ? { at: i.ordered_at, batchId: i.batch_id } : null })),
-    batches: batches.map(b => ({ id: b.id, createdAt: b.created_at, supplierId: b.supplier_id, to: b.to_email, subject: b.subject, body: b.body, lines: b.lines || [], keys: b.keys || [] })),
+    orders: orders.map(o => ({ code: o.code, date: o.order_date, customer: o.customer, shoptetStatus: o.shoptet_status, active: o.active, note: o.note || '', archived: o.archived })),
+    items: items.map(i => ({ key: i.key, orderCode: i.order_code, code: i.code, name: i.name, qty: Number(i.qty), unit: i.unit, active: i.active, decision: i.decision, supplierId: i.supplier_id || '', aufId: i.auf_id || '' })),
+    aufs: aufs.map(a => ({ id: a.id, orderCode: a.order_code, supplierId: a.supplier_id || '', status: a.status, to: a.email_to, subject: a.subject, body: a.body, lines: a.lines || [], sentAt: a.sent_at, aufNumber: a.auf_number || '', amount: a.amount_eur == null ? null : Number(a.amount_eur), confirmedAt: a.confirmed_at, note: a.note || '', shipmentId: a.shipment_id || '', createdAt: a.created_at })),
+    shipments: ships.map(s => ({ id: s.id, date: s.ship_date || '', note: s.note || '' })),
+    events,
     sync: { fetchedAt: st.last_sync_at, error: st.last_sync_error, errorAt: st.last_sync_error_at, headers: st.sync_headers || [], rowCount: st.sync_row_count, sample: st.sync_sample || [], statuses: st.sync_statuses || {} },
   };
 }
-// Spustí načtení ze Shoptetu (přes databázi → Edge Function) a počká na výsledek
+// akce: provede změnu, znovu načte data a překreslí
+async function act(fn, msg) {
+  busy = true;
+  try { const r = await fn(); await loadState(); if (msg) toast(msg); render(); return r; }
+  catch (e) { toast('Chyba: ' + e.message); console.error(e); }
+  finally { busy = false; }
+}
 async function requestSync() {
   const snap = async () => ok(await sb.from('settings').select('last_sync_at,last_sync_error_at').eq('id', 1).single());
   const before = await snap();
@@ -104,104 +126,71 @@ async function requestSync() {
     await new Promise(r => setTimeout(r, 3000));
     const now = await snap();
     if (now.last_sync_at !== before.last_sync_at || now.last_sync_error_at !== before.last_sync_error_at) {
-      sb.rpc('request_shoptet_sync', { task: 'products' }).then(() => {}, () => {}); // MPN + dodavatelé na pozadí
+      sb.rpc('request_shoptet_sync', { task: 'products' }).then(() => {}, () => {});
       return;
     }
   }
   throw new Error('Shoptet neodpověděl do 90 s, zkus to za chvíli znovu.');
 }
-async function dispatch(method, url, b = {}) {
-  const now = new Date().toISOString();
-  let m;
-  if (url === '/api/state') return;
-  if (url === '/api/sync') return requestSync();
-  if (url === '/api/settings') {
-    // last_sync_at: null → funkce se hned spustí znovu i s novým stavem / sloupci / odkazem
-    ok(await sb.from('settings').update({
-      csv_url: b.csvUrl, products_csv_url: b.productsCsvUrl, deepl_api_key: (b.deeplKey || '').trim(), status_value: b.statusValue, mapping: b.mapping, company_name: b.companyName,
-      subject_template: b.subjectTemplate, extra_note: b.extraNote, signature: b.signature, last_sync_at: null,
-    }).eq('id', 1));
-    return requestSync();
-  }
-  if (url === '/api/suppliers') {
-    const row = { name: b.name, country: b.country, email: b.email, contact: b.contact, customer_no: b.customerNo, notes: b.notes };
-    if (b.id) return ok(await sb.from('suppliers').update(row).eq('id', b.id));
-    return ok(await sb.from('suppliers').insert(row));
-  }
-  if ((m = url.match(/^\/api\/suppliers\/(.+)$/))) return ok(await sb.from('suppliers').delete().eq('id', m[1]));
-  if (url === '/api/products') {
-    const d = b.data, row = { code: b.code, updated_at: now };
-    if (d.supplierId !== undefined) { row.skip = d.supplierId === 'none'; row.supplier_id = d.supplierId && d.supplierId !== 'none' ? d.supplierId : null; }
-    if (d.supplierCode !== undefined) row.supplier_code = d.supplierCode;
-    if (d.supplierName !== undefined) row.supplier_name = d.supplierName;
-    return ok(await sb.from('products').upsert(row, { onConflict: 'code' }));
-  }
-  if (url === '/api/batches') {
-    const batch = ok(await sb.from('batches').insert({ supplier_id: b.supplierId, to_email: b.to, subject: b.subject, body: b.body, lines: b.lines, keys: b.keys }).select().single());
-    for (let i = 0; i < b.keys.length; i += 200)
-      ok(await sb.from('order_items').update({ ordered_at: batch.created_at, batch_id: batch.id }).in('key', b.keys.slice(i, i + 200)));
-    return;
-  }
-  if ((m = url.match(/^\/api\/batches\/(.+)$/))) {
-    ok(await sb.from('order_items').update({ ordered_at: null, batch_id: null }).eq('batch_id', m[1]));
-    return ok(await sb.from('batches').delete().eq('id', m[1]));
-  }
-  if (url === '/api/ordered')
-    return ok(await sb.from('order_items').update(b.ordered ? { ordered_at: now, batch_id: null } : { ordered_at: null, batch_id: null }).eq('key', b.key));
-  throw new Error('Neznámá akce ' + url);
-}
-async function api(method, url, body) {
-  busy = true;
-  try { await dispatch(method, url, body); await loadState(); return S; }
-  catch (e) { toast('Chyba: ' + e.message); throw e; }
-  finally { busy = false; }
-}
 
 // ---------- derived ----------
 const supplierById = id => S.suppliers.find(s => s.id === id);
+const supName = id => supplierById(id)?.name || '(bez dodavatele)';
 const prod = code => S.products[code] || {};
-// co jde do e-mailu: ručně zadané údaje mají přednost, jinak MPN / automatický překlad
-const supCode = code => prod(code).supplierCode || prod(code).mpn || code;
-const enName = code => prod(code).supplierName || prod(code).nameEn || '';
-function openItems() { return S.items.filter(i => !i.ordered); }
-function groupsToOrder() {
-  const groups = new Map(); // supplierId -> products map
-  for (const it of openItems()) {
-    const sid = prod(it.code).supplierId || '';
-    if (!groups.has(sid)) groups.set(sid, new Map());
-    const g = groups.get(sid);
-    if (!g.has(it.code)) g.set(it.code, { code: it.code, name: it.name, unit: it.unit, qty: 0, items: [] });
-    const p = g.get(it.code); p.qty += it.qty; p.items.push(it);
-  }
-  return groups;
+const supCode = code => prod(code).supplierCode || prod(code).mpn || code;     // kód do e-mailu
+const enName = code => prod(code).supplierName || prod(code).nameEn || '';     // název do e-mailu
+const orderByCode = code => S.orders.find(o => o.code === code);
+const aufById = id => S.aufs.find(a => a.id === id);
+const aufsOf = code => S.aufs.filter(a => a.orderCode === code);
+const orderItems = code => S.items.filter(i => i.orderCode === code && (i.active || i.aufId));
+const shipmentById = id => S.shipments.find(s => s.id === id);
+const aufsInShipment = id => S.aufs.filter(a => a.shipmentId === id);
+const sumEur = list => list.reduce((s, a) => s + (a.amount || 0), 0);
+// dodavatel položky: ručně u položky > výchozí u produktu
+function effSup(it) { if (it.supplierId) return it.supplierId; const d = prod(it.code).supplierId; return d && d !== 'none' ? d : ''; }
+// objednat / neobjednávat: ručně u položky > podle produktu (neobjednávat = skladem/CZ) > výchozí objednat
+function effDec(it) { if (it.decision) return it.decision; if (prod(it.code).supplierId === 'none') return 'skip'; return 'order'; }
+function orderState(code) {
+  const its = orderItems(code), aufs = aufsOf(code);
+  if (!its.length && !aufs.length) return 'empty';
+  const open = its.filter(i => !i.aufId);
+  if (open.some(i => effDec(i) === 'order') || aufs.some(a => a.status === 'draft')) return 'todo';
+  if (aufs.some(a => a.status === 'sent')) return 'waiting';
+  if (aufs.some(a => a.status === 'confirmed' && !a.shipmentId)) return 'confirmed';
+  if (aufs.some(a => a.status === 'confirmed')) return 'shipping';
+  return 'none';
 }
 function counts() {
-  const open = openItems();
-  const unassigned = open.filter(i => !prod(i.code).supplierId).length;
-  const toOrder = open.filter(i => { const s = prod(i.code).supplierId; return s && s !== 'none'; }).length;
-  const orders = new Set(S.items.map(i => i.orderCode)).size;
-  return { unassigned, toOrder, orders, open: open.length };
+  const act = S.orders.filter(o => !o.archived);
+  const st = act.map(o => orderState(o.code));
+  return {
+    todo: st.filter(x => x === 'todo').length, waiting: st.filter(x => x === 'waiting').length,
+    unshipped: S.aufs.filter(a => a.status === 'confirmed' && !a.shipmentId).length,
+    shipping: S.shipments.filter(s => s.date >= todayIso()).length,
+    sentAufs: S.aufs.filter(a => a.status === 'sent').length,
+  };
 }
 
 // ---------- router ----------
 function route() {
-  const h = location.hash.replace(/^#\/?/, '').split('/');
-  return { app: h[0] || '', tab: h[1] || '' };
+  const h = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+  return { app: h[0] || '', tab: h[1] || '', id: h[2] || '' };
 }
 function render() {
   if (!S) { $('#view').innerHTML = '<div class="empty"><div class="big spin">◌</div>Načítám…</div>'; return; }
   const r = route();
   const crumb = $('#crumb');
-  if (!r.app) { crumb.innerHTML = ''; return renderHub(); }
-  const app = APPS.find(a => a.id === r.app);
-  if (!app) { location.hash = '#/'; return; }
-  crumb.innerHTML = `<span>/</span><b>${esc(app.title)}</b>`;
-  renderOrders(r.tab || 'k-objednani');
+  if (r.app === 'kalendar') { crumb.innerHTML = `<span>/</span><b>Kalendář</b>`; return renderCalendar(); }
+  if (r.app !== 'objednavky') { crumb.innerHTML = ''; return renderHub(); }
+  crumb.innerHTML = `<span>/</span><a href="#/objednavky">Objednávky od dodavatelů</a>${r.tab === 'o' ? `<span>/</span><b>${esc(r.id)}</b>` : ''}`;
+  if (r.tab === 'o') return renderOrderDetail(r.id);
+  renderOrdersApp(r.tab || 'objednavky');
 }
 
 // ---------- HUB ----------
 function renderHub() {
   const c = counts();
+  const next = S.events.filter(e => e.starts_on >= todayIso()).slice(0, 3);
   $('#view').innerHTML = `
     <section class="hero">
       <div class="eyebrow">Jointshon — FJ · interní nástroje</div>
@@ -209,16 +198,23 @@ function renderHub() {
       <p>Všechny tvoje pracovní aplikace na jednom místě — na počítači i v telefonu.</p>
     </section>
     <div class="apps">
-      ${APPS.map((a, i) => `
-        <a class="app-card" href="#/${a.id}">
-          <div class="row"><div class="app-icon">${a.icon}</div><span class="num grow" style="text-align:right">0${i + 1}</span></div>
-          <h3>${esc(a.title)}</h3>
-          <p>${esc(a.desc)}</p>
-          <div class="badge-row">
-            ${c.toOrder ? `<span class="badge warn"><span class="dot"></span>${c.toOrder} k objednání</span>` : c.unassigned ? '' : `<span class="badge ok"><span class="dot"></span>Vše objednáno</span>`}
-            ${c.unassigned ? `<span class="badge bad">${c.unassigned} bez dodavatele</span>` : ''}
-          </div>
-        </a>`).join('')}
+      <a class="app-card" href="#/objednavky">
+        <div class="row"><div class="app-icon">📦</div><span class="num grow" style="text-align:right">01</span></div>
+        <h3>Objednávky od dodavatelů</h3>
+        <p>Objednávky ze Shoptetu → e-mail dodavateli → AUF → svoz.</p>
+        <div class="badge-row">
+          ${c.todo ? `<span class="badge warn"><span class="dot"></span>${c.todo} potřeba objednat</span>` : ''}
+          ${c.sentAufs ? `<span class="badge info">${c.sentAufs} čeká na AUF</span>` : ''}
+          ${c.unshipped ? `<span class="badge ok">${c.unshipped} AUF bez svozu</span>` : ''}
+          ${!c.todo && !c.sentAufs && !c.unshipped ? `<span class="badge ok"><span class="dot"></span>Vše vyřízeno</span>` : ''}
+        </div>
+      </a>
+      <a class="app-card" href="#/kalendar">
+        <div class="row"><div class="app-icon">📅</div><span class="num grow" style="text-align:right">SmartJoi</span></div>
+        <h3>Kalendář</h3>
+        <p>${next.length ? next.map(e => `<b>${esc(fmtDay(e.starts_on))}</b> · ${esc(e.title)}`).join('<br>') : 'Společný kalendář všech aplikací — propojený s Google Kalendářem.'}</p>
+        <div class="badge-row"><span class="badge">${plural(S.events.filter(e => e.starts_on >= todayIso()).length, 'nadcházející událost', 'nadcházející události', 'nadcházejících událostí')}</span></div>
+      </a>
       <div class="app-card soon">
         <div class="row"><div class="app-icon">＋</div></div>
         <h3>Další aplikace</h3>
@@ -228,159 +224,489 @@ function renderHub() {
     <div class="footer">SmartJoi · Jointshon | FJ</div>`;
 }
 
-// ---------- ORDERS APP ----------
-function renderOrders(tab) {
+// ---------- KALENDÁŘ (společný pro celý SmartJoi) ----------
+const icsUrl = () => `${SUPABASE_URL}/functions/v1/calendar-ics?token=${S.settings.calendarToken}`;
+function gcalLink({ title, date, details = '' }) {
+  const d1 = date.replaceAll('-', ''), x = new Date(date + 'T00:00:00Z'); x.setUTCDate(x.getUTCDate() + 1);
+  const d2 = x.toISOString().slice(0, 10).replaceAll('-', '');
+  return 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=' + encodeURIComponent(title) + '&dates=' + d1 + '/' + d2 + '&details=' + encodeURIComponent(details);
+}
+// API pro všechny aplikace SmartJoi: zapsat / smazat událost ve společném kalendáři
+export const SJCalendar = {
+  async upsert({ app, ref, title, date, details = '', url = '' }) {
+    if (!date) return this.remove(ref);
+    ok(await sb.from('calendar_events').upsert({ app, ref, title, starts_on: date, details, url, updated_at: new Date().toISOString() }, { onConflict: 'ref' }));
+  },
+  async remove(ref) { ok(await sb.from('calendar_events').delete().eq('ref', ref)); },
+};
+function renderCalendar() {
+  const up = S.events.filter(e => e.starts_on >= todayIso());
+  const past = S.events.filter(e => e.starts_on < todayIso()).reverse();
+  const APPN = { objednavky: '📦 Objednávky' };
+  const row = e => `<tr><td style="white-space:nowrap"><b>${esc(fmtDay(e.starts_on))}</b></td><td>${esc(e.title)}<div class="sub">${esc(APPN[e.app] || e.app)}</div></td>
+    <td style="text-align:right"><a class="btn sm" target="_blank" rel="noopener" href="${esc(gcalLink({ title: e.title, date: e.starts_on, details: e.details }))}">＋ Google</a></td></tr>`;
+  $('#view').innerHTML = `
+    <div class="page-head"><div><div class="eyebrow">SmartJoi</div><h1>Kalendář</h1></div></div>
+    <div class="card stack">
+      <div><h2>Propojení s Google Kalendářem</h2><div class="sub">Jednou přidáš kalendář „SmartJoi“ do Google Kalendáře a všechny termíny ze všech aplikací SmartJoi (svozy i další, co přibudou) se tam budou zobrazovat samy.</div></div>
+      <ol class="small" style="margin:0;padding-left:18px;line-height:1.8">
+        <li>Zkopíruj odkaz níže.</li>
+        <li>Otevři Google Kalendář → vlevo <b>Další kalendáře ＋</b> → <b>Z adresy URL</b> (nebo tlačítko níže).</li>
+        <li>Vlož odkaz a klikni na <b>Přidat kalendář</b>.</li>
+      </ol>
+      <div class="copy-box"><input type="text" readonly id="ics-url" value="${esc(icsUrl())}"><button class="btn sm" id="copy-ics">Kopírovat</button></div>
+      <div class="row"><a class="btn primary" target="_blank" rel="noopener" href="https://calendar.google.com/calendar/u/0/r/settings/addbyurl">Otevřít Google Kalendář</a>
+        <button class="btn ghost sm" id="rotate-ics" title="Starý odkaz přestane fungovat">Vygenerovat nový odkaz</button></div>
+      <div class="small muted">Google si odebírané kalendáře obnovuje sám, obvykle během několika hodin. Když potřebuješ termín hned, použij u události tlačítko „＋ Google“. Odkaz je tajný — nesdílej ho.</div>
+    </div>
+    <div class="card"><div class="card-head"><h2 style="margin:0">Nadcházející</h2></div>
+      ${up.length ? `<div class="table-wrap"><table><tbody>${up.map(row).join('')}</tbody></table></div>` : '<div class="empty">Žádné nadcházející události.</div>'}
+    </div>
+    ${past.length ? `<div class="card"><div class="card-head"><h3 style="margin:0">Proběhlé (30 dní)</h3></div><div class="table-wrap"><table><tbody>${past.map(row).join('')}</tbody></table></div></div>` : ''}`;
+  $('#copy-ics').onclick = () => copyText(icsUrl());
+  $('#rotate-ics').onclick = async () => {
+    if (!confirm('Vygenerovat nový odkaz? Ten starý v Google Kalendáři přestane fungovat a budeš ho tam muset přidat znovu.')) return;
+    const tok = [...crypto.getRandomValues(new Uint8Array(18))].map(b => b.toString(16).padStart(2, '0')).join('');
+    await act(async () => ok(await sb.from('settings').update({ calendar_token: tok }).eq('id', 1)), 'Nový odkaz vytvořen ✓');
+  };
+}
+
+// ---------- APLIKACE OBJEDNÁVKY ----------
+function syncNotices() {
+  const sync = S.sync, m = S.settings.mapping || {};
+  let h = '';
+  if (sync.error && !/Nerozpoznal jsem sloupce/.test(sync.error)) h += `<div class="notice bad"><b>Nepodařilo se načíst CSV ze Shoptetu:</b> ${esc(sync.error)} <span class="muted small">(${ago(sync.errorAt)})</span></div>`;
+  if (sync.headers.length && !m.itemCode && !m.itemName) h += `<div class="notice warn"><b>Export ze Shoptetu neobsahuje položky objednávek.</b> <a href="#/objednavky/nastaveni">Sloupce v exportu →</a></div>`;
+  return h;
+}
+function renderOrdersApp(tab) {
   const c = counts();
-  const sync = S.sync;
-  const tabCount = { 'k-objednani': c.toOrder + c.unassigned, objednavky: c.orders, dodavatele: S.suppliers.length, historie: S.batches.length };
+  const tabCount = { objednavky: c.todo, aufy: c.sentAufs, svozy: c.unshipped, dodavatele: S.suppliers.length };
   let html = `
     <div class="page-head">
-      <div>
-        <div class="eyebrow">Aplikace 01</div>
-        <h1>Objednávky od dodavatelů</h1>
-      </div>
+      <div><div class="eyebrow">Aplikace 01</div><h1>Objednávky od dodavatelů</h1></div>
       <div class="row">
-        <span class="small muted">Shoptet: ${sync.error ? `<span style="color:var(--bad)">chyba</span>` : ago(sync.fetchedAt)}</span>
+        <span class="small muted">Shoptet: ${S.sync.error ? `<span style="color:var(--bad)">chyba</span>` : ago(S.sync.fetchedAt)}</span>
         <button class="btn" id="btn-sync">↻ Načíst ze Shoptetu</button>
       </div>
     </div>
-    <div class="tabs">${TABS.map(([id, l]) => `<button class="tab ${id === tab ? 'active' : ''}" data-tab="${id}">${l}${tabCount[id] ? `<span class="count">${tabCount[id]}</span>` : ''}</button>`).join('')}</div>`;
-
-  if (sync.error && !/Nerozpoznal jsem sloupce/.test(sync.error)) html += `<div class="notice bad"><b>Nepodařilo se načíst CSV ze Shoptetu:</b> ${esc(sync.error)} <span class="muted small">(${ago(sync.errorAt)})</span></div>`;
-  const m = S.settings.mapping || {};
-  if (sync.headers.length && !m.itemCode && !m.itemName)
-    html += `<div class="notice warn"><b>Export ze Shoptetu neobsahuje položky objednávek.</b> V šabloně CSV exportu objednávek ve Shoptetu přidej sloupce s položkami (kód, název, množství, jednotka, typ položky) — pak se tady produkty objeví samy. <a href="#/objednavky/nastaveni">Sloupce v exportu →</a></div>`;
-  else if (sync.headers.length && !m.status)
-    html += `<div class="notice warn">Nepoznal jsem sloupec se stavem objednávky. <a href="#/objednavky/nastaveni">Nastav ho v Nastavení →</a></div>`;
-  const stNames = Object.keys(sync.statuses || {});
-  if (stNames.length && !stNames.some(x => x.toLowerCase() === String(S.settings.statusValue).trim().toLowerCase()))
-    html += `<div class="notice warn">Stav <b>„${esc(S.settings.statusValue)}“</b> se v exportu ze Shoptetu zatím nevyskytuje. Buď ho ve Shoptetu vytvoř a nastav objednávkám, nebo v <a href="#/objednavky/nastaveni">Nastavení</a> vyber jiný stav.</div>`;
-
-  const T = { 'k-objednani': tabToOrder, objednavky: tabOrders, produkty: tabProducts, dodavatele: tabSuppliers, historie: tabHistory, nastaveni: tabSettings };
-  html += (T[tab] || tabToOrder)();
+    <div class="tabs">${TABS.map(([id, l]) => `<button class="tab ${id === tab ? 'active' : ''}" data-tab="${id}">${l}${tabCount[id] ? `<span class="count">${tabCount[id]}</span>` : ''}</button>`).join('')}</div>
+    ${syncNotices()}`;
+  const T = { objednavky: tabOrders, aufy: tabAufs, svozy: tabShipments, produkty: tabProducts, dodavatele: tabSuppliers, nastaveni: tabSettings };
+  html += (T[tab] || tabOrders)();
   $('#view').innerHTML = html;
-
   document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { location.hash = `#/objednavky/${b.dataset.tab}`; });
   $('#btn-sync').onclick = doSync;
   bind();
 }
-
 async function doSync() {
   const b = $('#btn-sync'); if (b) { b.disabled = true; b.innerHTML = '<span class="spin">↻</span> Načítám…'; }
-  try { await api('POST', '/api/sync'); toast(S.sync.error ? 'Chyba při načítání' : 'Načteno ze Shoptetu ✓'); } catch {}
-  render();
+  await act(requestSync, 'Načteno ze Shoptetu ✓');
 }
 
-function supplierSelect(code, cur, cls = '') {
-  return `<select class="${cls}" data-assign="${esc(code)}">
+// --- tab: Objednávky (seznam)
+function tabOrders() {
+  const c = counts();
+  const archived = ui.orderFilter === 'archive';
+  const list = S.orders.filter(o => o.archived === archived)
+    .map(o => ({ o, st: orderState(o.code) }))
+    .filter(x => archived || x.st !== 'empty' || x.o.active)
+    .sort((a, b) => STATE[a.st][2] - STATE[b.st][2] || String(b.o.date).localeCompare(String(a.o.date)) || b.o.code.localeCompare(a.o.code));
+  let h = `<div class="stats">
+      <div class="stat"><div class="v" style="${c.todo ? 'color:var(--warn)' : ''}">${c.todo}</div><div class="l">potřeba objednat</div></div>
+      <div class="stat"><div class="v">${c.sentAufs}</div><div class="l">čeká na AUF</div></div>
+      <div class="stat"><div class="v">${c.unshipped}</div><div class="l">AUF bez svozu</div></div>
+      <div class="stat"><div class="v">${c.shipping}</div><div class="l">naplánované svozy</div></div>
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      <div class="chips"><button class="chip ${!archived ? 'on' : ''}" data-ofilter="active">Aktivní</button><button class="chip ${archived ? 'on' : ''}" data-ofilter="archive">Archiv</button></div>
+    </div>`;
+  if (!list.length) return h + `<div class="card empty"><div class="big">✓</div><b>${archived ? 'Archiv je prázdný.' : `Žádné objednávky ve stavu „${esc(S.settings.statusValue)}“.`}</b><div class="small">${!archived && S.sync.fetchedAt ? 'Poslední načtení ' + ago(S.sync.fetchedAt) + '.' : ''}</div></div>`;
+  h += `<div class="card" style="padding:6px 0"><div class="olist">${list.map(({ o, st }) => {
+    const its = orderItems(o.code);
+    const sups = [...new Set(its.filter(i => effDec(i) === 'order' && effSup(i)).map(effSup))];
+    const aufs = aufsOf(o.code).filter(a => a.aufNumber);
+    return `<a class="orow" href="#/objednavky/o/${encodeURIComponent(o.code)}">
+      <div class="grow"><div class="row" style="gap:8px"><b>${esc(o.code)}</b>${o.note ? '<span title="Má poznámku">📝</span>' : ''}${!o.active && o.shoptetStatus ? `<span class="sub">Shoptet: ${esc(o.shoptetStatus)}</span>` : ''}</div>
+        <div class="sub">${esc(o.customer || '')}${o.customer && o.date ? ' · ' : ''}${esc(String(o.date).slice(0, 10))} · ${plural(its.length, 'položka', 'položky', 'položek')}${sups.length ? ' · ' + sups.map(s => `${flag(supplierById(s)?.country)} ${esc(supName(s))}`).join(', ') : ''}${aufs.length ? ' · AUF ' + aufs.map(a => esc(a.aufNumber)).join(', ') : ''}</div></div>
+      <span class="badge ${STATE[st][1]}">${STATE[st][0]}</span><span class="chev">›</span></a>`;
+  }).join('')}</div></div>`;
+  return h;
+}
+
+// --- detail objednávky
+function renderOrderDetail(code) {
+  const o = orderByCode(code);
+  if (!o) { $('#view').innerHTML = `<div class="card empty">Objednávka ${esc(code)} nenalezena. <a href="#/objednavky">Zpět</a></div>`; return; }
+  const its = orderItems(code);
+  const aufs = aufsOf(code);
+  const st = orderState(code);
+  const open = its.filter(i => !i.aufId);
+  const needSup = open.filter(i => effDec(i) === 'order' && !effSup(i)).length;
+  const groups = new Map();
+  for (const i of open) if (effDec(i) === 'order' && effSup(i)) { const s = effSup(i); if (!groups.has(s)) groups.set(s, []); groups.get(s).push(i); }
+  const locked = i => i.aufId && aufById(i.aufId)?.status !== 'draft';
+  const supOptions = cur => `<option value="" ${!cur ? 'selected' : ''}>— dodavatel —</option>${S.suppliers.map(s => `<option value="${s.id}" ${cur === s.id ? 'selected' : ''}>${flag(s.country)} ${esc(s.name)}</option>`).join('')}<option value="__new">＋ Nový dodavatel…</option>`;
+  $('#view').innerHTML = `
+    <div class="page-head">
+      <div><a class="small muted" href="#/objednavky" style="text-decoration:none">← Objednávky</a>
+        <h1>${esc(o.code)}</h1>
+        <div class="sub">${esc(o.customer || '')}${o.customer && o.date ? ' · ' : ''}${esc(o.date || '')} · Shoptet: ${esc(o.shoptetStatus || '—')}</div></div>
+      <div class="row"><span class="badge ${STATE[st][1]}">${STATE[st][0]}</span>
+        <button class="btn sm ghost" id="o-archive">${o.archived ? '↩ Obnovit z archivu' : '🗄 Archivovat'}</button></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div><h2>Položky</h2><div class="sub">Zaškrtni, co objednáváš, a u koho. Dodavatel se u produktu zapamatuje pro příště.</div></div></div>
+      ${!its.length ? '<div class="empty">Objednávka nemá položky ke zboží.</div>' : `
+      <div class="table-wrap"><table class="items">
+        <thead><tr><th style="width:34px" title="Objednat">Obj.</th><th>Kód · MPN</th><th>Produkt</th><th class="num">Množství</th><th style="width:210px">Dodavatel</th></tr></thead>
+        <tbody>${its.map(i => {
+          const p = prod(i.code), dec = effDec(i), a = i.aufId ? aufById(i.aufId) : null;
+          return `<tr class="${dec === 'skip' ? 'done' : ''}">
+            <td><input type="checkbox" data-dec="${esc(i.key)}" ${dec === 'order' ? 'checked' : ''} ${locked(i) ? 'disabled' : ''} title="${dec === 'skip' ? 'Neobjednává se' : 'Objednat'}"></td>
+            <td><code>${esc(i.code)}</code>${p.mpn ? `<div class="sub">MPN ${esc(p.mpn)}</div>` : ''}</td>
+            <td>${esc(i.name)}${enName(i.code) ? `<div class="sub">${esc(enName(i.code))}</div>` : ''}${!i.active ? '<div class="sub" style="color:var(--warn)">už není v objednávce ve Shoptetu</div>' : ''}</td>
+            <td class="num"><b>${fmtQty(i.qty)}</b> ${esc(i.unit)}</td>
+            <td>${dec === 'skip' ? '<span class="muted small">neobjednává se</span>' : a
+              ? `<span class="small">${flag(supplierById(a.supplierId)?.country)} ${esc(supName(a.supplierId))}</span><div class="sub">${a.aufNumber ? 'AUF ' + esc(a.aufNumber) : esc(AUF_STATE[a.status][0])}</div>`
+              : `<select data-isup="${esc(i.key)}">${supOptions(effSup(i))}</select>${!effSup(i) && p.shoptetSupplier ? `<div class="sub">Shoptet: ${esc(p.shoptetSupplier)}</div>` : ''}`}</td></tr>`;
+        }).join('')}</tbody></table></div>`}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div><h2>Objednávky u dodavatelů</h2><div class="sub">1 dodavatel = 1 e-mail = 1 AUF.</div></div></div>
+      ${needSup ? `<div class="notice warn">${plural(needSup, 'položka nemá', 'položky nemají', 'položek nemá')} vybraného dodavatele — vyber ho, nebo odškrtni „Obj.“.</div>` : ''}
+      ${[...groups.entries()].map(([sid, list]) => { const s = supplierById(sid) || {}; return `
+        <div class="auf pending"><div class="auf-head"><span class="flag">${flag(s.country)}</span><div class="grow"><b>${esc(s.name || '?')}</b><div class="sub">${plural(list.length, 'položka', 'položky', 'položek')} k objednání${s.email ? ' · ' + esc(s.email) : ' · <span style="color:var(--bad)">chybí e-mail</span>'}</div></div>
+          <button class="btn primary" data-mkauf="${sid}">✉ Připravit e-mail</button></div></div>`; }).join('')}
+      ${aufs.map(a => renderAuf(a)).join('')}
+      ${!groups.size && !aufs.length ? '<div class="small muted">Zatím nic — zaškrtni položky a vyber dodavatele.</div>' : ''}
+    </div>
+
+    <div class="card stack">
+      <div><h2>Poznámky</h2></div>
+      <textarea id="o-note" placeholder="Poznámky k objednávce…" style="min-height:110px">${esc(o.note)}</textarea>
+      <div class="row" style="justify-content:flex-end"><span class="small muted grow" id="note-state"></span><button class="btn sm" id="o-note-save">Uložit poznámku</button></div>
+    </div>`;
+  bindOrderDetail(o);
+  bindAufs();
+}
+function bindOrderDetail(o) {
+  const V = $('#view');
+  $('#o-archive').onclick = () => act(async () => ok(await sb.from('orders').update({ archived: !o.archived }).eq('code', o.code)), o.archived ? 'Obnoveno ✓' : 'Archivováno ✓');
+  const saveNote = async () => {
+    const v = $('#o-note').value; if (v === o.note) return;
+    try { ok(await sb.from('orders').update({ note: v, updated_at: new Date().toISOString() }).eq('code', o.code)); o.note = v; $('#note-state').textContent = 'Uloženo ' + new Date().toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' }); }
+    catch (e) { toast('Chyba: ' + e.message); }
+  };
+  $('#o-note-save').onclick = saveNote;
+  $('#o-note').onblur = saveNote;
+  V.querySelectorAll('[data-dec]').forEach(cb => cb.onchange = () => act(async () => {
+    ok(await sb.from('order_items').update({ decision: cb.checked ? 'order' : 'skip' }).eq('key', cb.dataset.dec));
+  }));
+  V.querySelectorAll('[data-isup]').forEach(sel => sel.onchange = () => {
+    const it = S.items.find(i => i.key === sel.dataset.isup);
+    if (sel.value === '__new') return editSupplier('', it.code, it.key);
+    return act(async () => {
+      ok(await sb.from('order_items').update({ supplier_id: sel.value || null, ...(sel.value ? { decision: 'order' } : {}) }).eq('key', it.key));
+      // zapamatovat u produktu, pokud ještě dodavatele nemá
+      if (sel.value && !prod(it.code).supplierId) ok(await sb.from('products').update({ supplier_id: sel.value, skip: false, updated_at: new Date().toISOString() }).eq('code', it.code));
+    });
+  });
+  V.querySelectorAll('[data-mkauf]').forEach(b => b.onclick = () => createAuf(o.code, b.dataset.mkauf));
+}
+
+// ---------- AUF (objednávka u dodavatele) ----------
+function renderAuf(a, { showOrder = false } = {}) {
+  const s = supplierById(a.supplierId) || { name: '(smazaný dodavatel)' };
+  const ship = a.shipmentId ? shipmentById(a.shipmentId) : null;
+  const docs = ui.docs[a.id];
+  const shipOpts = `<option value="">— bez svozu —</option>${S.shipments.map(x => `<option value="${x.id}" ${a.shipmentId === x.id ? 'selected' : ''}>${esc(fmtDay(x.date))}${x.note ? ' · ' + esc(x.note) : ''}</option>`).join('')}<option value="__new">＋ Nový svoz…</option>`;
+  return `<div class="auf ${a.status}" data-aufcard="${a.id}">
+    <div class="auf-head">
+      <span class="flag">${flag(s.country)}</span>
+      <div class="grow"><b>${esc(s.name)}</b>${showOrder ? ` · <a href="#/objednavky/o/${encodeURIComponent(a.orderCode)}">obj. ${esc(a.orderCode)}</a>` : ''}
+        <div class="sub">${plural(a.lines.length, 'položka', 'položky', 'položek')}${a.sentAt ? ' · odesláno ' + fmtDate(a.sentAt, false) : ''}${ship ? ' · svoz ' + esc(fmtDay(ship.date)) : ''}</div></div>
+      ${a.aufNumber ? `<div class="auf-no"><div class="sub">AUF</div><b>${esc(a.aufNumber)}</b></div>` : ''}
+      ${a.amount != null ? `<div class="auf-no"><div class="sub">Částka</div><b>${eur(a.amount)}</b></div>` : ''}
+      <span class="badge ${AUF_STATE[a.status][1]}">${AUF_STATE[a.status][0]}</span>
+    </div>
+    <div class="auf-lines small muted">${a.lines.map(l => `${esc(l.code)} × ${fmtQty(l.qty)}`).join(' · ')}</div>
+    ${a.status === 'draft' ? `<div class="row"><button class="btn primary sm" data-aufmail="${a.id}">✉ Otevřít e-mail</button><button class="btn sm ghost danger" data-aufdel="${a.id}">Zrušit</button></div>` : `
+    <div class="auf-form">
+      <label class="field"><span>AUF číslo (od dodavatele)</span><input type="text" data-aufno="${a.id}" value="${esc(a.aufNumber)}" placeholder="např. 4711234"></label>
+      <label class="field"><span>Částka AUF (EUR)</span><input type="text" inputmode="decimal" data-aufamt="${a.id}" value="${a.amount != null ? String(a.amount).replace('.', ',') : ''}" placeholder="0,00"></label>
+      ${a.status === 'confirmed' ? `<label class="field"><span>Svoz</span><select data-aufship="${a.id}">${shipOpts}</select></label>` : '<div></div>'}
+      <div class="field"><span>&nbsp;</span><button class="btn ${a.status === 'sent' ? 'primary' : ''}" data-aufsave="${a.id}">${a.status === 'sent' ? '✓ Uložit AUF' : 'Uložit'}</button></div>
+    </div>
+    <div class="docs" data-docs="${a.id}">
+      <div class="sub" style="margin-bottom:6px">Dokumenty</div>
+      ${docs === undefined || docs === 'loading' ? '<div class="small muted">Načítám…</div>' : docs.length ? docs.map(d => `<div class="doc"><a href="#" data-dl="${esc(a.id + '/' + d.name)}">📄 ${esc(d.name.replace(/^\d+-/, ''))}</a><span class="sub">${fmtSize(d.metadata?.size || 0)}</span><button class="icon-btn" data-deldoc="${esc(a.id + '/' + d.name)}" title="Smazat">🗑</button></div>`).join('') : '<div class="small muted">Zatím žádné.</div>'}
+      <label class="btn sm" style="margin-top:6px">＋ Přiložit dokument<input type="file" multiple data-upload="${a.id}" hidden></label>
+    </div>
+    <div class="row"><button class="btn sm ghost" data-aufmail="${a.id}">✉ E-mail</button>${a.status === 'sent' ? `<button class="btn sm ghost danger" data-aufdel="${a.id}">Zrušit objednávku</button>` : ''}</div>`}
+  </div>`;
+}
+function bindAufs() {
+  const V = $('#view');
+  V.querySelectorAll('[data-aufmail]').forEach(b => b.onclick = () => openAufEmail(b.dataset.aufmail));
+  V.querySelectorAll('[data-aufdel]').forEach(b => b.onclick = () => {
+    if (!confirm('Zrušit? Položky se vrátí do „potřeba objednat“.')) return;
+    const id = b.dataset.aufdel;
+    act(async () => { ok(await sb.from('order_items').update({ auf_id: null }).eq('auf_id', id)); ok(await sb.from('aufs').delete().eq('id', id)); }, 'Zrušeno');
+  });
+  V.querySelectorAll('[data-aufsave]').forEach(b => b.onclick = () => {
+    const id = b.dataset.aufsave, a = aufById(id);
+    const no = V.querySelector(`[data-aufno="${id}"]`).value.trim();
+    const amtRaw = V.querySelector(`[data-aufamt="${id}"]`).value.trim();
+    const amount = amtRaw ? parseEur(amtRaw) : null;
+    if (amtRaw && amount == null) return toast('Částka není číslo');
+    const row = { auf_number: no, amount_eur: amount, updated_at: new Date().toISOString() };
+    if (no && a.status === 'sent') Object.assign(row, { status: 'confirmed', confirmed_at: new Date().toISOString() });
+    if (!no && a.status === 'confirmed') Object.assign(row, { status: 'sent', confirmed_at: null, shipment_id: null });
+    act(async () => { ok(await sb.from('aufs').update(row).eq('id', id)); if (a.shipmentId) await syncShipmentEvent(a.shipmentId); },
+      no && a.status === 'sent' ? 'AUF potvrzen ✓' : 'Uloženo ✓');
+  });
+  V.querySelectorAll('[data-aufship]').forEach(sel => sel.onchange = () => {
+    const id = sel.dataset.aufship, a = aufById(id);
+    if (sel.value === '__new') return editShipment('', id);
+    act(async () => {
+      ok(await sb.from('aufs').update({ shipment_id: sel.value || null, updated_at: new Date().toISOString() }).eq('id', id));
+      if (a.shipmentId) await syncShipmentEvent(a.shipmentId);
+      if (sel.value) await syncShipmentEvent(sel.value);
+    }, sel.value ? 'Přidáno do svozu ✓' : 'Odebráno ze svozu');
+  });
+  V.querySelectorAll('[data-upload]').forEach(inp => inp.onchange = async () => {
+    const id = inp.dataset.upload;
+    for (const f of inp.files) {
+      const safe = f.name.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w.\-]+/g, '_');
+      const { error } = await sb.storage.from('auf-docs').upload(`${id}/${Date.now()}-${safe}`, f, { contentType: f.type || undefined });
+      if (error) { toast('Chyba nahrávání: ' + error.message); break; }
+    }
+    toast('Nahráno ✓'); await loadDocs(id);
+  });
+  V.querySelectorAll('[data-dl]').forEach(a => a.onclick = async e => {
+    e.preventDefault();
+    const w = window.open('', '_blank');
+    const { data, error } = await sb.storage.from('auf-docs').createSignedUrl(a.dataset.dl, 600);
+    if (error) { w?.close(); return toast('Chyba: ' + error.message); }
+    if (w) w.location = data.signedUrl; else location.href = data.signedUrl;
+  });
+  V.querySelectorAll('[data-deldoc]').forEach(b => b.onclick = async () => {
+    if (!confirm('Smazat dokument?')) return;
+    const { error } = await sb.storage.from('auf-docs').remove([b.dataset.deldoc]);
+    if (error) return toast('Chyba: ' + error.message);
+    await loadDocs(b.dataset.deldoc.split('/')[0]);
+  });
+  // dokumenty načti na pozadí
+  V.querySelectorAll('[data-docs]').forEach(el => { const id = el.dataset.docs; if (ui.docs[id] === undefined) loadDocs(id); });
+}
+async function loadDocs(id) {
+  ui.docs[id] = 'loading';
+  const { data, error } = await sb.storage.from('auf-docs').list(id, { sortBy: { column: 'name', order: 'asc' } });
+  ui.docs[id] = error ? [] : (data || []).filter(d => d.name && !d.name.startsWith('.'));
+  const card = document.querySelector(`[data-aufcard="${id}"]`);
+  const a = aufById(id);
+  if (card && a) { card.outerHTML = renderAuf(a, { showOrder: route().tab !== 'o' }); bindAufs(); }
+}
+
+// e-mail pro 1 objednávku × 1 dodavatele
+function buildEmail(order, sid, items, includeRefs) {
+  const s = supplierById(sid) || {};
+  const st = S.settings;
+  const date = new Date().toLocaleDateString('en-GB');
+  const fill = t => String(t || '').replaceAll('{company}', st.companyName || '').replaceAll('{date}', date)
+    .replaceAll('{supplier}', s.name || '').replaceAll('{orders}', order.code).replaceAll('{order}', order.code);
+  const mpnCount = {}; for (const i of items) { const c = supCode(i.code); mpnCount[c] = (mpnCount[c] || 0) + 1; }
+  const lines = items.map((i, n) => {
+    const code = supCode(i.code);
+    let l = `${n + 1}. ${code}${mpnCount[code] > 1 && code !== i.code ? ` (${i.code})` : ''}${enName(i.code) ? ' – ' + enName(i.code) : ''} – ${fmtQtyEn(i.qty)} ${unitEn(i.unit)}`;
+    if (includeRefs) l += `  (ref.: ${order.code})`;
+    return l;
+  });
+  const body = [
+    s.contact ? `Dear ${s.contact},` : 'Dear Sir or Madam,', '',
+    `we would like to place the following order${s.customerNo ? ` (customer no. ${s.customerNo})` : ''}:`, '',
+    ...lines, '',
+    'Please confirm the order and let us know the expected delivery date.',
+    ...(st.extraNote ? ['', fill(st.extraNote)] : []),
+    '', 'Thank you in advance.', '', st.signature || '',
+  ].join('\n');
+  return {
+    to: s.email || '', subject: fill(st.subjectTemplate || 'Purchase order {orders} – {company}'), body,
+    lines: items.map(i => ({ code: supCode(i.code), ourCode: i.code, name: enName(i.code) || i.name, qty: i.qty, unit: i.unit, key: i.key })),
+  };
+}
+async function createAuf(orderCode, sid) {
+  const o = orderByCode(orderCode);
+  const items = orderItems(orderCode).filter(i => !i.aufId && effDec(i) === 'order' && effSup(i) === sid);
+  if (!items.length) return;
+  const mail = buildEmail(o, sid, items, false);
+  const id = await act(async () => {
+    const a = ok(await sb.from('aufs').insert({ order_code: orderCode, supplier_id: sid, status: 'draft', email_to: mail.to, subject: mail.subject, body: mail.body, lines: mail.lines }).select().single());
+    ok(await sb.from('order_items').update({ auf_id: a.id, supplier_id: sid, decision: 'order' }).in('key', items.map(i => i.key)));
+    return a.id;
+  });
+  if (id) openAufEmail(id);
+}
+function openAufEmail(id) {
+  const a = aufById(id); if (!a) return;
+  const s = supplierById(a.supplierId) || {};
+  const draft = a.status === 'draft';
+  const auto = a.lines.filter(l => !prod(l.ourCode).supplierName && prod(l.ourCode).nameEn).length;
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal">
+    <div class="modal-head"><h2>✉ ${esc(a.orderCode)} · ${flag(s.country)} ${esc(s.name || '')}</h2><button class="icon-btn" data-close>✕</button></div>
+    ${!a.to ? `<div class="notice warn">Dodavatel nemá vyplněný e-mail. Doplň ho v záložce Dodavatelé.</div>` : ''}
+    ${draft && auto ? `<div class="notice">Názvy jsou přeložené automaticky — před odesláním je rychle projeď. Trvalou opravu uděláš přes ✎ u produktu.</div>` : ''}
+    <div class="stack">
+      <label class="field"><span>Komu</span><div class="copy-box"><input type="text" id="m-to" value="${esc(a.to)}"><button class="btn sm" data-mcopy="m-to">Kopírovat</button></div></label>
+      <label class="field"><span>Předmět</span><div class="copy-box"><input type="text" id="m-subject" value="${esc(a.subject)}"><button class="btn sm" data-mcopy="m-subject">Kopírovat</button></div></label>
+      <label class="field"><span>Text e-mailu</span><div class="copy-box"><textarea id="m-body" class="mail-body">${esc(a.body)}</textarea><button class="btn sm" data-mcopy="m-body">Kopírovat</button></div></label>
+      ${draft ? `<div class="row"><button class="btn sm ghost" id="m-regen">↻ Vytvořit text znovu (po úpravě produktů / šablony)</button></div>` : ''}
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close>${draft ? 'Uložit a zavřít' : 'Zavřít'}</button>
+      ${draft ? `<button class="btn primary" id="m-sent">✓ Odesláno — čekám na AUF</button>` : ''}
+    </div></div></div>`;
+  const root = $('#modal-root');
+  const texts = () => ({ email_to: $('#m-to').value, subject: $('#m-subject').value, body: $('#m-body').value, updated_at: new Date().toISOString() });
+  const close = async () => {
+    if (draft) { const t = texts(); if (t.email_to !== a.to || t.subject !== a.subject || t.body !== a.body) await act(async () => ok(await sb.from('aufs').update(t).eq('id', id))); }
+    closeModal();
+  };
+  root.querySelectorAll('[data-close]').forEach(b => b.onclick = close);
+  root.querySelector('.modal-back').onclick = e => { if (e.target.classList.contains('modal-back')) close(); };
+  root.querySelectorAll('[data-mcopy]').forEach(b => b.onclick = e => { e.preventDefault(); copyText($('#' + b.dataset.mcopy).value); });
+  if (draft) {
+    $('#m-regen').onclick = () => {
+      const items = a.lines.map(l => S.items.find(i => i.key === l.key)).filter(Boolean);
+      const m = buildEmail(orderByCode(a.orderCode), a.supplierId, items, false);
+      $('#m-to').value = m.to; $('#m-subject').value = m.subject; $('#m-body').value = m.body; toast('Text vytvořen znovu');
+    };
+    $('#m-sent').onclick = async () => {
+      const t = texts(); closeModal();
+      await act(async () => ok(await sb.from('aufs').update({ ...t, status: 'sent', sent_at: new Date().toISOString() }).eq('id', id)), 'Označeno jako odeslané ✓ — čekáme na AUF');
+    };
+  }
+}
+
+// --- tab: AUFy
+function tabAufs() {
+  const F = { sent: ['Čeká na AUF', a => a.status === 'sent'], unshipped: ['Potvrzené bez svozu', a => a.status === 'confirmed' && !a.shipmentId], confirmed: ['Všechny potvrzené', a => a.status === 'confirmed'], all: ['Vše', () => true] };
+  const f = F[ui.aufFilter] ? ui.aufFilter : 'sent';
+  const list = S.aufs.filter(F[f][1]);
+  const conf = S.aufs.filter(a => a.status === 'confirmed');
+  let h = `<div class="stats">
+    <div class="stat"><div class="v">${S.aufs.filter(a => a.status === 'sent').length}</div><div class="l">čeká na AUF</div></div>
+    <div class="stat"><div class="v">${conf.filter(a => !a.shipmentId).length}</div><div class="l">potvrzené bez svozu</div></div>
+    <div class="stat"><div class="v eur">${eur(sumEur(conf.filter(a => !a.shipmentId)))}</div><div class="l">hodnota bez svozu</div></div>
+    <div class="stat"><div class="v">${S.aufs.filter(a => a.status === 'draft').length}</div><div class="l">neodeslané koncepty</div></div>
+  </div>
+  <div class="chips" style="margin-bottom:12px">${Object.entries(F).map(([k, [l, fn]]) => `<button class="chip ${k === f ? 'on' : ''}" data-afilter="${k}">${l} <span class="muted">${S.aufs.filter(fn).length}</span></button>`).join('')}</div>`;
+  if (!list.length) return h + `<div class="card empty">Nic tu není.</div>`;
+  return h + `<div class="card">${list.map(a => renderAuf(a, { showOrder: true })).join('')}</div>`;
+}
+
+// --- tab: Svozy
+function tabShipments() {
+  const unassigned = S.aufs.filter(a => a.status === 'confirmed' && !a.shipmentId);
+  const upcoming = S.shipments.filter(s => !s.date || s.date >= todayIso());
+  const past = S.shipments.filter(s => s.date && s.date < todayIso()).reverse();
+  const shipCard = s => {
+    const list = aufsInShipment(s.id);
+    const details = shipmentDetails(s);
+    return `<div class="card ship">
+      <div class="card-head">
+        <div><h2 style="margin:0">🚚 ${esc(fmtDay(s.date))}</h2>${s.note ? `<div class="sub">${esc(s.note)}</div>` : ''}</div>
+        <div class="row">
+          <div class="auf-no"><div class="sub">AUFů</div><b>${list.length}</b></div>
+          <div class="auf-no"><div class="sub">Celkem</div><b>${eur(sumEur(list))}</b></div>
+        </div>
+      </div>
+      ${list.length ? `<div class="table-wrap"><table><thead><tr><th>AUF</th><th>Dodavatel</th><th class="hide-m">Objednávka</th><th class="num">Částka</th><th></th></tr></thead><tbody>
+        ${list.map(a => `<tr><td><b>${esc(a.aufNumber)}</b></td><td>${flag(supplierById(a.supplierId)?.country)} ${esc(supName(a.supplierId))}</td>
+          <td class="hide-m"><a href="#/objednavky/o/${encodeURIComponent(a.orderCode)}">${esc(a.orderCode)}</a></td><td class="num">${eur(a.amount)}</td>
+          <td><button class="icon-btn" data-unship="${a.id}" title="Odebrat ze svozu">✕</button></td></tr>`).join('')}
+        <tr class="total"><td colspan="3" class="hide-m"><b>Celkem</b></td><td class="num"><b>${eur(sumEur(list))}</b></td><td></td></tr>
+      </tbody></table></div>` : '<div class="small muted">Zatím žádný AUF.</div>'}
+      <div class="row" style="margin-top:12px">
+        ${unassigned.length ? `<select data-addauf="${s.id}" style="max-width:320px"><option value="">＋ Přidat AUF…</option>${unassigned.map(a => `<option value="${a.id}">AUF ${esc(a.aufNumber)} · ${esc(supName(a.supplierId))} · ${eur(a.amount)}</option>`).join('')}</select>` : ''}
+        <span class="grow"></span>
+        ${s.date ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(gcalLink({ title: details.title, date: s.date, details: details.text }))}">📅 Přidat do Google</a>` : ''}
+        <button class="icon-btn" data-editship="${s.id}" title="Upravit">✎</button><button class="icon-btn" data-delship="${s.id}" title="Smazat svoz">🗑</button>
+      </div>
+    </div>`;
+  };
+  return `
+    <div class="row" style="margin-bottom:14px"><button class="btn primary" data-editship="">＋ Nový svoz</button><span class="small muted">Termíny svozů se automaticky propisují do kalendáře SmartJoi.</span></div>
+    <div class="card">
+      <div class="card-head"><div><h2 style="margin:0">AUFy bez svozu</h2><div class="sub">Potvrzené objednávky u dodavatelů, které ještě nejsou naplánované.</div></div>
+        <div class="auf-no"><div class="sub">${plural(unassigned.length, 'AUF', 'AUFy', 'AUFů')}</div><b>${eur(sumEur(unassigned))}</b></div></div>
+      ${unassigned.length ? `<div class="table-wrap"><table><tbody>${unassigned.map(a => `<tr><td><b>${esc(a.aufNumber)}</b></td><td>${flag(supplierById(a.supplierId)?.country)} ${esc(supName(a.supplierId))}</td>
+        <td class="hide-m"><a href="#/objednavky/o/${encodeURIComponent(a.orderCode)}">${esc(a.orderCode)}</a></td><td class="num">${eur(a.amount)}</td>
+        <td style="width:200px"><select data-aufship="${a.id}"><option value="">— do svozu —</option>${S.shipments.map(x => `<option value="${x.id}">${esc(fmtDay(x.date))}</option>`).join('')}<option value="__new">＋ Nový svoz…</option></select></td></tr>`).join('')}</tbody></table></div>` : '<div class="small muted">Vše je naplánované.</div>'}
+    </div>
+    ${upcoming.map(shipCard).join('') || '<div class="card empty">Žádný naplánovaný svoz.</div>'}
+    ${past.length ? `<div class="row" style="margin:6px 0 12px"><button class="btn sm ghost" data-togglepast>${ui.showPast ? 'Skrýt' : 'Zobrazit'} proběhlé svozy (${past.length})</button></div>${ui.showPast ? past.map(shipCard).join('') : ''}` : ''}`;
+}
+function shipmentDetails(s) {
+  const list = aufsInShipment(s.id);
+  const title = `Svoz · ${plural(list.length, 'AUF', 'AUFy', 'AUFů')} · ${eur(sumEur(list))}`;
+  const text = list.map(a => `AUF ${a.aufNumber} – ${supName(a.supplierId)} – obj. ${a.orderCode} – ${eur(a.amount)}`).join('\n')
+    + (list.length ? `\nCelkem: ${eur(sumEur(list))}` : '') + (s.note ? `\n\n${s.note}` : '');
+  return { title, text };
+}
+// zapíše / aktualizuje termín svozu ve společném kalendáři SmartJoi
+async function syncShipmentEvent(id) {
+  const { data: s } = await sb.from('shipments').select('*').eq('id', id).maybeSingle();
+  if (!s) return SJCalendar.remove('shipment:' + id);
+  const { data: list } = await sb.from('aufs').select('*').eq('shipment_id', id);
+  const ls = (list || []).map(a => ({ aufNumber: a.auf_number, supplierId: a.supplier_id, orderCode: a.order_code, amount: a.amount_eur == null ? null : Number(a.amount_eur) }));
+  const title = `Svoz · ${plural(ls.length, 'AUF', 'AUFy', 'AUFů')} · ${eur(sumEur(ls))}`;
+  const text = ls.map(a => `AUF ${a.aufNumber} – ${supName(a.supplierId)} – obj. ${a.orderCode} – ${eur(a.amount)}`).join('\n') + (ls.length ? `\nCelkem: ${eur(sumEur(ls))}` : '') + (s.note ? `\n\n${s.note}` : '');
+  await SJCalendar.upsert({ app: 'objednavky', ref: 'shipment:' + id, title, date: s.ship_date, details: text, url: location.origin + location.pathname + '#/objednavky/svozy' });
+}
+function editShipment(id, thenAufId) {
+  const s = shipmentById(id) || { id: '', date: '', note: '' };
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:460px">
+    <div class="modal-head"><h2>${s.id ? 'Upravit svoz' : 'Nový svoz'}</h2><button class="icon-btn" data-close>✕</button></div>
+    <div class="stack">
+      <label class="field"><span>Datum svozu</span><input type="date" id="sh-date" value="${esc(s.date)}"></label>
+      <label class="field"><span>Poznámka (volitelné)</span><input type="text" id="sh-note" value="${esc(s.note)}" placeholder="např. kamion z Bayreuthu"></label>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="sh-save">Uložit</button></div>
+  </div></div>`;
+  $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = () => { closeModal(); render(); });
+  $('#sh-save').onclick = async () => {
+    const row = { ship_date: $('#sh-date').value || null, note: $('#sh-note').value.trim() };
+    closeModal();
+    await act(async () => {
+      const saved = s.id ? ok(await sb.from('shipments').update(row).eq('id', s.id).select().single()) : ok(await sb.from('shipments').insert(row).select().single());
+      if (thenAufId) ok(await sb.from('aufs').update({ shipment_id: saved.id }).eq('id', thenAufId));
+      await syncShipmentEvent(saved.id);
+    }, 'Svoz uložen ✓');
+  };
+}
+
+// --- tab: Produkty
+function supplierSelect(code, cur) {
+  return `<select data-assign="${esc(code)}">
     <option value="" ${!cur ? 'selected' : ''}>— vyber dodavatele —</option>
     ${S.suppliers.map(s => `<option value="${s.id}" ${cur === s.id ? 'selected' : ''}>${flag(s.country)} ${esc(s.name)}</option>`).join('')}
     <option value="none" ${cur === 'none' ? 'selected' : ''}>✕ Neobjednávat (skladem / CZ)</option>
     <option value="__new">＋ Nový dodavatel…</option>
   </select>`;
 }
-
-// --- tab: K objednání
-function tabToOrder() {
-  const c = counts();
-  const groups = groupsToOrder();
-  let h = `<div class="stats">
-      <div class="stat"><div class="v">${c.toOrder}</div><div class="l">položek k objednání</div></div>
-      <div class="stat"><div class="v" style="${c.unassigned ? 'color:var(--bad)' : ''}">${c.unassigned}</div><div class="l">bez dodavatele</div></div>
-      <div class="stat"><div class="v">${c.orders}</div><div class="l">objednávek „${esc(S.settings.statusValue)}“</div></div>
-      <div class="stat"><div class="v">${S.batches.filter(b => Date.now() - Date.parse(b.createdAt) < 7 * 864e5).length}</div><div class="l">e-mailů za 7 dní</div></div>
-    </div>`;
-
-  if (!S.items.length) {
-    return h + `<div class="card empty"><div class="big">✓</div><b>Žádné objednávky ve stavu „${esc(S.settings.statusValue)}“.</b><div class="small">${S.sync.fetchedAt ? 'Poslední načtení ' + ago(S.sync.fetchedAt) + '.' : 'Zatím se nic nenačetlo.'}</div></div>`;
-  }
-
-  // nepřiřazené
-  const un = groups.get('');
-  if (un) {
-    h += `<div class="group"><div class="group-head"><span class="flag">❓</span><h2 class="grow">Bez dodavatele</h2><span class="badge bad">${un.size} ${un.size === 1 ? 'produkt' : un.size < 5 ? 'produkty' : 'produktů'}</span></div>
-      <div class="group-body"><p class="small muted" style="margin:10px 0 4px">Přiřaď produkt k dodavateli — aplikace si to zapamatuje pro další objednávky.</p>
-      <div class="table-wrap"><table><thead><tr><th>Produkt</th><th class="num">Množství</th><th class="hide-m">Objednávky</th><th style="width:230px">Dodavatel</th></tr></thead><tbody>
-      ${[...un.values()].map(p => `<tr>
-        <td><code>${esc(p.code)}</code><div class="sub">${esc(p.name)}</div></td>
-        <td class="num">${fmtQty(p.qty)} ${esc(p.unit)}</td>
-        <td class="hide-m small muted">${p.items.map(i => esc(i.orderCode)).join(', ')}</td>
-        <td>${supplierSelect(p.code, '')}${prod(p.code).shoptetSupplier ? `<div class="sub" style="margin-top:4px">Shoptet: ${esc(prod(p.code).shoptetSupplier)}</div>` : ''}</td></tr>`).join('')}
-      </tbody></table></div></div></div>`;
-  }
-
-  // podle dodavatelů
-  const sups = [...groups.keys()].filter(k => k && k !== 'none');
-  if (!sups.length && !un) h += `<div class="card empty"><div class="big">✓</div><b>Nic k objednání.</b><div class="small">Všechny položky jsou objednané nebo označené jako „neobjednávat“.</div></div>`;
-  for (const sid of sups) {
-    const s = supplierById(sid) || { name: '(smazaný dodavatel)', country: '' };
-    const g = groups.get(sid);
-    h += `<div class="group"><div class="group-head">
-        <span class="flag">${flag(s.country)}</span>
-        <div class="grow"><h2>${esc(s.name)}</h2><div class="sub">${esc(s.email || 'bez e-mailu')}${s.contact ? ' · ' + esc(s.contact) : ''}</div></div>
-        <span class="badge warn">${g.size} ${g.size === 1 ? 'produkt' : g.size < 5 ? 'produkty' : 'produktů'}</span>
-        <button class="btn primary" data-email="${sid}">✉ Připravit e-mail</button>
-      </div><div class="group-body"><div class="table-wrap"><table>
-        <thead><tr><th style="width:30px"><input type="checkbox" checked data-all="${sid}"></th><th>Kód (MPN)</th><th>Produkt (EN)</th><th class="num">Množství</th><th class="hide-m">Objednávky</th><th></th></tr></thead><tbody>
-        ${[...g.values()].map(p => {
-          const pr = prod(p.code);
-          return `<tr>
-          <td><input type="checkbox" checked data-pick="${sid}" value="${esc(p.code)}"></td>
-          <td><code>${esc(supCode(p.code))}</code>${supCode(p.code) !== p.code ? `<div class="sub">náš: ${esc(p.code)}</div>` : ''}</td>
-          <td>${enName(p.code) ? esc(enName(p.code)) + (!pr.supplierName && pr.nameEnSrc ? ' <span class="badge" title="Přeloženo automaticky" style="padding:0 6px;font-size:10px">auto</span>' : '') : '<span class="muted">—</span>'}<div class="sub">${esc(p.name)}</div></td>
-          <td class="num"><b>${fmtQty(p.qty)}</b> ${esc(p.unit)}</td>
-          <td class="hide-m small muted">${p.items.map(i => esc(i.orderCode) + (p.items.length > 1 ? ` (${fmtQty(i.qty)})` : '')).join(', ')}</td>
-          <td><button class="icon-btn" title="Upravit produkt" data-editprod="${esc(p.code)}">✎</button></td></tr>`;
-        }).join('')}
-        </tbody></table></div></div></div>`;
-  }
-
-  const none = groups.get('none');
-  if (none) {
-    h += `<div class="card"><div class="card-head"><div><h3 style="margin:0">Neobjednáváme <span class="muted">(${none.size})</span></h3><div class="sub">Produkty označené jako skladem / od českého dodavatele.</div></div>
-      <button class="btn sm ghost" data-toggle-none>${ui.showNone ? 'Skrýt' : 'Zobrazit'}</button></div>
-      ${ui.showNone ? `<div class="table-wrap"><table><tbody>${[...none.values()].map(p => `<tr><td><code>${esc(p.code)}</code><div class="sub">${esc(p.name)}</div></td><td class="num">${fmtQty(p.qty)} ${esc(p.unit)}</td><td style="width:230px">${supplierSelect(p.code, 'none')}</td></tr>`).join('')}</tbody></table></div>` : ''}</div>`;
-  }
-  return h;
-}
-
-// --- tab: Objednávky
-function tabOrders() {
-  const byOrder = new Map();
-  for (const it of S.items) { if (!byOrder.has(it.orderCode)) byOrder.set(it.orderCode, []); byOrder.get(it.orderCode).push(it); }
-  if (!byOrder.size) return `<div class="card empty"><div class="big">✓</div>Žádné objednávky ve stavu „${esc(S.settings.statusValue)}“.</div>`;
-  let h = `<p class="small muted" style="margin-top:0">Všechny objednávky ze Shoptetu ve stavu „${esc(S.settings.statusValue)}“. Jednotlivé položky můžeš ručně označit jako objednané.</p>`;
-  for (const [code, items] of byOrder) {
-    const done = items.filter(i => i.ordered).length;
-    const f = items[0];
-    h += `<div class="card"><div class="card-head">
-        <div><h3 style="margin:0">${esc(code)}</h3><div class="sub">${esc(f.customer)}${f.customer && f.date ? ' · ' : ''}${esc(f.date)}</div></div>
-        <span class="badge ${done === items.length ? 'ok' : done ? 'warn' : ''}">${done}/${items.length} objednáno</span></div>
-      <div class="table-wrap"><table><tbody>
-      ${items.map(i => {
-        const sid = prod(i.code).supplierId; const s = sid && sid !== 'none' ? supplierById(sid) : null;
-        return `<tr class="${i.ordered ? 'done' : ''}">
-          <td style="width:30px"><input type="checkbox" ${i.ordered ? 'checked' : ''} data-ordered="${esc(i.key)}" title="Objednáno"></td>
-          <td><code>${esc(i.code)}</code><div class="sub">${esc(i.name)}</div></td>
-          <td class="num">${fmtQty(i.qty)} ${esc(i.unit)}</td>
-          <td class="hide-m small">${sid === 'none' ? '<span class="muted">neobjednávat</span>' : s ? `${flag(s.country)} ${esc(s.name)}` : '<span style="color:var(--bad)">bez dodavatele</span>'}</td>
-          <td class="small muted hide-m">${i.ordered ? 'objednáno ' + fmtDate(i.ordered.at, false) : ''}</td></tr>`;
-      }).join('')}
-      </tbody></table></div></div>`;
-  }
-  return h;
-}
-
-// --- tab: Produkty
 function tabProducts() {
   const q = ui.search.trim().toLowerCase();
   const all = Object.entries(S.products).sort((a, b) => a[0].localeCompare(b[0], 'cs'));
   const list = all.filter(([code, p]) => !q || (code + ' ' + (p.name || '') + ' ' + (p.supplierCode || '') + ' ' + (p.supplierName || '') + ' ' + (p.mpn || '') + ' ' + (p.nameEn || '')).toLowerCase().includes(q));
   return `<div class="card">
-    <div class="card-head"><div><h2>Produkty</h2><div class="sub">Přiřazení dodavatele a údaje do e-mailu. MPN se načítá z exportu produktů ze Shoptetu, anglický název se překládá automaticky — obojí můžeš přes ✎ přepsat.</div></div>
-      <input type="search" id="prod-search" placeholder="Hledat kód nebo název…" value="${esc(ui.search)}" style="max-width:280px"></div>
+    <div class="card-head"><div><h2>Produkty</h2><div class="sub">Výchozí dodavatel produktu a údaje do e-mailu. MPN se načítá ze Shoptetu, anglický název se překládá automaticky — obojí můžeš přes ✎ přepsat.</div></div>
+      <input type="search" id="prod-search" placeholder="Hledat kód, MPN nebo název…" value="${esc(ui.search)}" style="max-width:280px"></div>
     ${!all.length ? '<div class="empty">Produkty se tu objeví automaticky, jakmile přijdou v objednávkách.</div>' : `
-    <div class="table-wrap"><table><thead><tr><th>Náš kód / název</th><th style="width:220px">Dodavatel</th><th class="hide-m">MPN / kód dodavatele</th><th class="hide-m">Název EN</th><th></th></tr></thead><tbody>
+    <div class="table-wrap"><table><thead><tr><th>Náš kód / název</th><th style="width:220px">Výchozí dodavatel</th><th class="hide-m">MPN / kód do e-mailu</th><th class="hide-m">Název EN</th><th></th></tr></thead><tbody>
     ${list.slice(0, 400).map(([code, p]) => `<tr>
       <td><code>${esc(code)}</code><div class="sub">${esc(p.name)}</div></td>
       <td>${supplierSelect(code, p.supplierId || '')}${p.shoptetSupplier ? `<div class="sub" style="margin-top:4px">Shoptet: ${esc(p.shoptetSupplier)}</div>` : ''}</td>
@@ -395,36 +721,18 @@ function tabProducts() {
 function tabSuppliers() {
   const used = id => Object.values(S.products).filter(p => p.supplierId === id).length;
   return `<div class="card">
-    <div class="card-head"><div><h2>Dodavatelé</h2><div class="sub">Zahraniční dodavatelé, kterým se posílá objednávka e-mailem.</div></div>
+    <div class="card-head"><div><h2>Dodavatelé</h2><div class="sub">Když se dodavatel jmenuje stejně jako ve Shoptetu, produkty se mu přiřadí samy.</div></div>
       <button class="btn primary" data-editsup="">＋ Přidat dodavatele</button></div>
-    ${!S.suppliers.length ? `<div class="empty"><div class="big">🌍</div>Zatím žádný dodavatel. Přidej třeba toho z Německa.</div>` : `
-    <div class="table-wrap"><table><thead><tr><th>Dodavatel</th><th class="hide-m">E-mail</th><th class="hide-m">Kontakt</th><th class="num">Produktů</th><th></th></tr></thead><tbody>
+    ${!S.suppliers.length ? `<div class="empty"><div class="big">🌍</div>Zatím žádný dodavatel.</div>` : `
+    <div class="table-wrap"><table><thead><tr><th>Dodavatel</th><th class="hide-m">E-mail</th><th class="hide-m">Kontakt</th><th class="num">Produktů</th><th class="num">AUFů</th><th></th></tr></thead><tbody>
     ${S.suppliers.map(s => `<tr>
       <td><span class="flag">${flag(s.country)}</span> <b>${esc(s.name)}</b><div class="sub">${esc(countryName(s.country))}${s.customerNo ? ' · zák. č. ' + esc(s.customerNo) : ''}</div></td>
       <td class="hide-m small">${esc(s.email) || '<span class="muted">—</span>'}</td>
       <td class="hide-m small">${esc(s.contact) || '<span class="muted">—</span>'}</td>
-      <td class="num">${used(s.id)}</td>
+      <td class="num">${used(s.id)}</td><td class="num">${S.aufs.filter(a => a.supplierId === s.id).length}</td>
       <td style="white-space:nowrap"><button class="icon-btn" data-editsup="${s.id}">✎</button><button class="icon-btn" data-delsup="${s.id}" title="Smazat">🗑</button></td></tr>`).join('')}
     </tbody></table></div>`}
   </div>`;
-}
-
-// --- tab: Historie
-function tabHistory() {
-  if (!S.batches.length) return `<div class="card empty"><div class="big">🗂</div>Zatím žádné odeslané objednávky. Po označení e-mailu jako odeslaného se objeví tady.</div>`;
-  return S.batches.map(b => {
-    const s = supplierById(b.supplierId) || { name: '(smazaný dodavatel)' };
-    const open = ui.histOpen[b.id];
-    return `<div class="card">
-      <div class="card-head"><div><h3 style="margin:0">${flag(s.country)} ${esc(s.name)}</h3><div class="sub">${fmtDate(b.createdAt)} · ${b.lines.length} produktů · ${new Set(b.keys.map(k => k.split('|')[0])).size} objednávek</div></div>
-        <div class="row"><button class="btn sm" data-histtoggle="${b.id}">${open ? 'Skrýt' : 'Zobrazit e-mail'}</button><button class="btn sm ghost danger" data-delbatch="${b.id}" title="Vrátí položky zpět do K objednání">Zrušit</button></div></div>
-      ${open ? `<div class="stack">
-        <div class="copy-box"><input type="text" readonly value="${esc(b.to)}"><button class="btn sm" data-copy="to" data-b="${b.id}">Kopírovat</button></div>
-        <div class="copy-box"><input type="text" readonly value="${esc(b.subject)}"><button class="btn sm" data-copy="subject" data-b="${b.id}">Kopírovat</button></div>
-        <div class="copy-box"><textarea readonly class="mail-body">${esc(b.body)}</textarea><button class="btn sm" data-copy="body" data-b="${b.id}">Kopírovat</button></div>
-      </div>` : `<div class="small muted">${b.lines.map(l => `${esc(l.code)} × ${fmtQty(l.qty)}`).join(' · ')}</div>`}
-    </div>`;
-  }).join('');
 }
 
 // --- tab: Nastavení
@@ -434,127 +742,42 @@ function tabSettings() {
   const hOpts = cur => `<option value="">— nepoužívat —</option>` + sync.headers.map(h => `<option ${h === cur ? 'selected' : ''}>${esc(h)}</option>`).join('');
   return `
   <div class="card stack">
-    <div><h2>Napojení na Shoptet</h2><div class="sub">CSV export objednávek z administrace Shoptetu. Aplikace ho sama stahuje v nastaveném intervalu.</div></div>
+    <div><h2>Napojení na Shoptet</h2><div class="sub">Aplikace stahuje exporty sama každých 15 minut.</div></div>
     <label class="field"><span>Odkaz na CSV export objednávek</span><input type="url" id="s-csvUrl" value="${esc(st.csvUrl)}"></label>
-    <label class="field"><span>Odkaz na export produktů — MPN a dodavatel (XML productsComplete nebo CSV)</span><input type="url" id="s-productsCsvUrl" placeholder="https://www.vinylor.cz/export/products.csv?…" value="${esc(st.productsCsvUrl)}"></label>
-    ${(() => { const i = st.productsSyncInfo || {}; if (!st.productsCsvUrl) return ''; if (!i.at) return '<div class="small muted">Export produktů se načte při dalším načtení ze Shoptetu.</div>';
-      return i.error ? `<div class="small" style="color:var(--bad)">Export produktů: ${esc(i.error)}${i.headers ? ` <span class="muted">(sloupce: ${esc(i.headers.join(', '))})</span>` : ''}</div>`
-        : `<div class="small muted">Export produktů: ${fmtDate(i.at)} · ${i.rows} produktů/variant · MPN z <code>${esc(i.mpnCol)}</code> · změněno ${i.updated} · automaticky přiřazeno k dodavateli ${i.assigned || 0}</div>`; })()}
-    <div class="grid-2">
-      <label class="field"><span>Stav objednávky, který znamená „objednat“</span>
-        <input type="text" id="s-statusValue" list="statuses" value="${esc(st.statusValue)}">
-        <datalist id="statuses">${statuses.map(([v]) => `<option value="${esc(v)}">`).join('')}</datalist></label>
-      <div class="field"><span class="small muted" style="display:block;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px">Automatické načítání</span><div class="small muted" style="padding-top:8px">Každých 15 minut (plánovač v Supabase)</div></div>
-    </div>
-    ${statuses.length ? `<div class="small muted">Stavy nalezené v exportu: ${statuses.map(([v, n]) => `<span class="badge ${v.toLowerCase() === st.statusValue.toLowerCase() ? 'ok' : ''}" style="margin:2px">${esc(v || '(prázdný)')} · ${n}</span>`).join(' ')}</div>` : ''}
-    <div class="small muted">Poslední načtení: ${sync.fetchedAt ? fmtDate(sync.fetchedAt) + ` · ${sync.rowCount} řádků · ${sync.headers.length} sloupců` : 'zatím ne'}${sync.error ? ` · <span style="color:var(--bad)">${esc(sync.error)}</span>` : ''}</div>
+    <label class="field"><span>Odkaz na export produktů — MPN a dodavatel (XML productsComplete nebo CSV)</span><input type="url" id="s-productsCsvUrl" value="${esc(st.productsCsvUrl)}"></label>
+    ${(() => { const i = st.productsSyncInfo || {}; if (!st.productsCsvUrl || !i.at) return '';
+      return i.error ? `<div class="small" style="color:var(--bad)">Export produktů: ${esc(i.error)}</div>`
+        : `<div class="small muted">Export produktů: ${fmtDate(i.at)} · ${i.rows} produktů/variant · MPN z <code>${esc(i.mpnCol)}</code> · změněno ${i.updated} · automaticky přiřazeno ${i.assigned || 0}</div>`; })()}
+    <label class="field"><span>Stav objednávky, který znamená „objednat“</span>
+      <input type="text" id="s-statusValue" list="statuses" value="${esc(st.statusValue)}">
+      <datalist id="statuses">${statuses.map(([v]) => `<option value="${esc(v)}">`).join('')}</datalist></label>
+    <div class="small muted">Poslední načtení: ${sync.fetchedAt ? fmtDate(sync.fetchedAt) + ` · ${sync.rowCount} řádků` : 'zatím ne'}${sync.error ? ` · <span style="color:var(--bad)">${esc(sync.error)}</span>` : ''}</div>
   </div>
-
   <div class="card stack">
-    <div><h2>Sloupce v CSV</h2><div class="sub">Aplikace je rozpoznala automaticky — pokud něco nesedí, oprav to tady.</div></div>
-    ${sync.headers.length ? `<div class="grid-3">${Object.entries(MAP_LABELS).map(([k, l]) => `<label class="field"><span>${l}</span><select data-map="${k}">${hOpts(m[k])}</select></label>`).join('')}</div>
-    <details><summary class="small muted" style="cursor:pointer">Náhled prvních řádků CSV</summary>
-      <div class="table-wrap" style="margin-top:10px"><table><thead><tr>${sync.headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead>
-      <tbody>${sync.sample.map(r => `<tr>${sync.headers.map((_, i) => `<td class="small">${esc(r[i])}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>`
+    <div><h2>Sloupce v CSV</h2><div class="sub">Rozpoznané automaticky — pokud něco nesedí, oprav to tady.</div></div>
+    ${sync.headers.length ? `<div class="grid-3">${Object.entries(MAP_LABELS).map(([k, l]) => `<label class="field"><span>${l}</span><select data-map="${k}">${hOpts(m[k])}</select></label>`).join('')}</div>`
     : '<div class="muted small">Sloupce se zobrazí po prvním úspěšném načtení CSV.</div>'}
   </div>
-
   <div class="card stack">
-    <div><h2>E-mail pro dodavatele</h2><div class="sub">Šablona objednávkového e-mailu (anglicky). V předmětu i doplňující větě můžeš použít {orders} (čísla našich objednávek), {company}, {date}, {supplier}.</div></div>
+    <div><h2>E-mail pro dodavatele</h2><div class="sub">Šablona (anglicky). V předmětu i doplňující větě můžeš použít {orders} (číslo objednávky), {company}, {date}, {supplier}.</div></div>
     <div class="grid-2">
       <label class="field"><span>Název firmy</span><input type="text" id="s-companyName" value="${esc(st.companyName)}"></label>
       <label class="field"><span>Předmět</span><input type="text" id="s-subjectTemplate" value="${esc(st.subjectTemplate)}"></label>
     </div>
-    <label class="field"><span>Klíč DeepL API (volitelné — lepší překlad názvů; bez něj se použije bezplatný MyMemory)</span>
-      <input type="text" id="s-deeplKey" autocomplete="off" spellcheck="false" placeholder="např. 1a2b3c4d-…:fx" value="${esc(st.deeplKey)}"></label>
+    <label class="field"><span>Doplňující věta (volitelné, EN)</span><textarea id="s-extraNote" placeholder="e.g. Our order reference: {orders}">${esc(st.extraNote)}</textarea></label>
+    <label class="field"><span>Podpis</span><textarea id="s-signature">${esc(st.signature)}</textarea></label>
+    <label class="field"><span>Klíč DeepL API (volitelné — lepší překlad názvů)</span>
+      <input type="text" id="s-deeplKey" autocomplete="off" spellcheck="false" value="${esc(st.deeplKey)}"></label>
     ${(() => { const t = st.translateInfo || {}; if (!t.at) return '';
       return t.error ? `<div class="small" style="color:var(--bad)">Překlad (${esc(t.provider)}): ${esc(t.error)} · ${fmtDate(t.at)}</div>`
         : `<div class="small muted">Poslední překlad: ${esc(t.provider === 'deepl' ? 'DeepL' : 'MyMemory')} · ${t.done} názvů · ${fmtDate(t.at)}</div>`; })()}
-    <label class="field"><span>Doplňující věta (volitelné, EN)</span><textarea id="s-extraNote" placeholder="e.g. Our order reference: {orders}">${esc(st.extraNote)}</textarea></label>
-    <label class="field"><span>Podpis</span><textarea id="s-signature">${esc(st.signature)}</textarea></label>
   </div>
   <div class="row" style="justify-content:flex-end"><button class="btn primary" id="save-settings">Uložit nastavení</button></div>`;
 }
 
-// ---------- email ----------
-function buildEmail(sid, codes, includeRefs) {
-  const s = supplierById(sid);
-  const st = S.settings;
-  const g = groupsToOrder().get(sid);
-  const picked = [...g.values()].filter(p => codes.includes(p.code));
-  const date = new Date().toLocaleDateString('en-GB');
-  // čísla našich objednávek, ze kterých vybrané položky pocházejí
-  const orders = [...new Set(picked.flatMap(p => p.items.map(x => x.orderCode)))].sort().join(', ');
-  const fill = t => String(t || '').replaceAll('{company}', st.companyName || '').replaceAll('{date}', date)
-    .replaceAll('{supplier}', s.name).replaceAll('{orders}', orders).replaceAll('{order}', orders);
-  const subject = fill(st.subjectTemplate || 'Purchase order – {company} – {date}');
-  // stejné MPN u více řádků (např. délkové varianty) → přidej i náš kód, ať je to jednoznačné
-  const mpnCount = {}; for (const p of picked) { const c = supCode(p.code); mpnCount[c] = (mpnCount[c] || 0) + 1; }
-  const lines = picked.map((p, i) => {
-    const pr = prod(p.code);
-    const code = supCode(p.code);
-    // do e-mailu jde jen anglický název; bez něj pouze kód (české názvy dodavatel nezná)
-    let l = `${i + 1}. ${code}${mpnCount[code] > 1 && code !== p.code ? ` (${p.code})` : ''}${enName(p.code) ? ' – ' + enName(p.code) : ''} – ${fmtQtyEn(p.qty)} ${unitEn(p.unit)}`;
-    if (includeRefs) l += `  (ref.: ${p.items.map(x => x.orderCode).join(', ')})`;
-    return l;
-  });
-  const greet = s.contact ? `Dear ${s.contact},` : 'Dear Sir or Madam,';
-  const body = [
-    greet, '',
-    `we would like to place the following order${s.customerNo ? ` (customer no. ${s.customerNo})` : ''}:`, '',
-    ...lines, '',
-    'Please confirm the order and let us know the expected delivery date.',
-    ...(st.extraNote ? ['', fill(st.extraNote)] : []),
-    '', 'Thank you in advance.', '',
-    st.signature || '',
-  ].join('\n');
-  return {
-    to: s.email || '', subject, body,
-    lines: picked.map(p => ({ code: supCode(p.code), ourCode: p.code, name: enName(p.code) || p.name, qty: p.qty, unit: p.unit })),
-    keys: picked.flatMap(p => p.items.map(i => i.key)),
-  };
-}
-
-function openEmail(sid) {
-  const codes = [...document.querySelectorAll(`[data-pick="${sid}"]:checked`)].map(x => x.value);
-  if (!codes.length) return toast('Vyber aspoň jeden produkt');
-  const s = supplierById(sid);
-  let mail = buildEmail(sid, codes, ui.includeRefs);
-  const draw = () => {
-    $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal">
-      <div class="modal-head"><h2>✉ Objednávka · ${flag(s.country)} ${esc(s.name)}</h2><button class="icon-btn" data-close>✕</button></div>
-      ${!s.email ? `<div class="notice warn">Dodavatel nemá vyplněný e-mail. Doplň ho v záložce Dodavatelé.</div>` : ''}
-      ${(() => {
-        const miss = codes.filter(c => !enName(c)).length, auto = codes.filter(c => !prod(c).supplierName && prod(c).nameEn).length;
-        return (miss ? `<div class="notice">U ${miss} ${miss === 1 ? 'produktu' : 'produktů'} zatím chybí anglický název (překlad proběhne při dalším načtení), v e-mailu je jen kód.</div>` : '')
-          + (auto ? `<div class="notice">Názvy jsou přeložené automaticky — před odesláním je rychle projeď. Opravu stačí udělat jednou přes ✎ u produktu.</div>` : '');
-      })()}
-      <div class="stack">
-        <label class="field"><span>Komu</span><div class="copy-box"><input type="text" id="m-to" value="${esc(mail.to)}"><button class="btn sm" data-mcopy="m-to">Kopírovat</button></div></label>
-        <label class="field"><span>Předmět</span><div class="copy-box"><input type="text" id="m-subject" value="${esc(mail.subject)}"><button class="btn sm" data-mcopy="m-subject">Kopírovat</button></div></label>
-        <label class="field"><span>Text e-mailu</span><div class="copy-box"><textarea id="m-body" class="mail-body">${esc(mail.body)}</textarea><button class="btn sm" data-mcopy="m-body">Kopírovat</button></div></label>
-        <label class="row small muted" style="cursor:pointer"><input type="checkbox" id="m-refs" ${ui.includeRefs ? 'checked' : ''}> Uvést u položek čísla našich objednávek</label>
-      </div>
-      <div class="modal-foot">
-        <button class="btn ghost" data-close>Zavřít</button>
-        <button class="btn primary" id="m-done">✓ Odesláno — označit jako objednané</button>
-      </div></div></div>`;
-    const root = $('#modal-root');
-    root.querySelectorAll('[data-close]').forEach(b => b.onclick = closeModal);
-    root.querySelector('.modal-back').onclick = e => { if (e.target.classList.contains('modal-back')) closeModal(); };
-    root.querySelectorAll('[data-mcopy]').forEach(b => b.onclick = e => { e.preventDefault(); copyText($('#' + b.dataset.mcopy).value); });
-    $('#m-refs').onchange = e => { ui.includeRefs = e.target.checked; mail = buildEmail(sid, codes, ui.includeRefs); draw(); };
-    $('#m-done').onclick = async () => {
-      await api('POST', '/api/batches', { supplierId: sid, to: $('#m-to').value, subject: $('#m-subject').value, body: $('#m-body').value, lines: mail.lines, keys: mail.keys });
-      closeModal(); toast('Označeno jako objednané ✓'); render();
-    };
-  };
-  draw();
-}
+// ---------- modaly: dodavatel, produkt ----------
 function closeModal() { $('#modal-root').innerHTML = ''; }
-
-// ---------- supplier / product modals ----------
-function editSupplier(id, thenAssignCode) {
+function editSupplier(id, thenAssignCode, thenItemKey) {
   const s = supplierById(id) || { id: '', name: (thenAssignCode && prod(thenAssignCode).shoptetSupplier) || '', country: 'DE', email: '', contact: '', customerNo: '', notes: '' };
   $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal">
     <div class="modal-head"><h2>${s.id ? 'Upravit dodavatele' : 'Nový dodavatel'}</h2><button class="icon-btn" data-close>✕</button></div>
@@ -573,93 +796,96 @@ function editSupplier(id, thenAssignCode) {
   $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = () => { closeModal(); render(); });
   $('#f-name').focus();
   $('#f-save').onclick = async () => {
-    const data = { id: s.id || undefined };
-    for (const k of ['name', 'country', 'email', 'contact', 'customerNo', 'notes']) data[k] = $('#f-' + k).value.trim();
-    if (!data.name) return toast('Vyplň název');
-    const before = new Set(S.suppliers.map(x => x.id));
-    await api('POST', '/api/suppliers', data);
-    if (thenAssignCode) {
-      const created = S.suppliers.find(x => !before.has(x.id));
-      if (created) await api('PUT', '/api/products', { code: thenAssignCode, data: { supplierId: created.id } });
-    }
-    // produkty bez dodavatele, které mají ve Shoptetu dodavatele se stejným názvem → přiřadit
-    const target = S.suppliers.find(x => x.name === data.name) ;
-    if (target) {
-      const { data: rows } = await sb.from('products').update({ supplier_id: target.id }).is('supplier_id', null).eq('skip', false).ilike('shoptet_supplier', data.name).select('code');
-      if (rows?.length) { await api('GET', '/api/state'); toast(`Přiřazeno ${rows.length} produktů podle Shoptetu ✓`); }
-    }
-    closeModal(); toast('Uloženo ✓'); render();
+    const d = {}; for (const k of ['name', 'country', 'email', 'contact', 'customerNo', 'notes']) d[k] = $('#f-' + k).value.trim();
+    if (!d.name) return toast('Vyplň název');
+    const row = { name: d.name, country: d.country, email: d.email, contact: d.contact, customer_no: d.customerNo, notes: d.notes };
+    closeModal();
+    await act(async () => {
+      const saved = s.id ? ok(await sb.from('suppliers').update(row).eq('id', s.id).select().single()) : ok(await sb.from('suppliers').insert(row).select().single());
+      if (thenAssignCode) ok(await sb.from('products').update({ supplier_id: saved.id, skip: false }).eq('code', thenAssignCode));
+      if (thenItemKey) ok(await sb.from('order_items').update({ supplier_id: saved.id, decision: 'order' }).eq('key', thenItemKey));
+      // produkty bez dodavatele se stejným dodavatelem ve Shoptetu → přiřadit
+      const { data: rows } = await sb.from('products').update({ supplier_id: saved.id }).is('supplier_id', null).eq('skip', false).ilike('shoptet_supplier', d.name).select('code');
+      if (rows?.length) setTimeout(() => toast(`Přiřazeno ${rows.length} produktů podle Shoptetu ✓`), 2100);
+    }, 'Dodavatel uložen ✓');
   };
 }
-
 function editProduct(code) {
   const p = prod(code);
   $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal">
     <div class="modal-head"><h2>Produkt <code>${esc(code)}</code></h2><button class="icon-btn" data-close>✕</button></div>
     <p class="muted small" style="margin-top:0">${esc(p.name)}</p>
     <div class="stack">
-      <label class="field"><span>Dodavatel</span>${supplierSelect(code, p.supplierId || '', 'no-auto').replace('<option value="__new">＋ Nový dodavatel…</option>', '')}</label>
+      <label class="field"><span>Výchozí dodavatel</span>${supplierSelect(code, p.supplierId || '').replace('<option value="__new">＋ Nový dodavatel…</option>', '')}</label>
       <div class="small muted">MPN ze Shoptetu: ${p.mpn ? `<code>${esc(p.mpn)}</code>` : '—'}</div>
       <label class="field"><span>Kód do e-mailu (prázdné = MPN, jinak náš kód)</span><input type="text" id="p-supplierCode" placeholder="${esc(p.mpn || code)}" value="${esc(p.supplierCode)}"></label>
       <label class="field"><span>Název pro dodavatele (anglicky)</span><input type="text" id="p-supplierName" placeholder="${esc(p.nameEn || 'Anglický název')}" value="${esc(p.supplierName || p.nameEn)}"></label>
-      
     </div>
     <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="p-save">Uložit</button></div>
   </div></div>`;
   $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = closeModal);
   $('#p-save').onclick = async () => {
-    await api('PUT', '/api/products', { code, data: {
-      supplierId: $('#modal-root select').value,
-      supplierCode: $('#p-supplierCode').value.trim(),
-      // uloží se jen ruční úprava; stejný text jako automatický překlad se neukládá
-      supplierName: (v => v === (p.nameEn || '') ? '' : v)($('#p-supplierName').value.trim()),
-    } });
-    closeModal(); toast('Uloženo ✓'); render();
+    const sup = $('#modal-root select').value;
+    const row = { skip: sup === 'none', supplier_id: sup && sup !== 'none' ? sup : null, supplier_code: $('#p-supplierCode').value.trim(),
+      supplier_name: (v => v === (p.nameEn || '') ? '' : v)($('#p-supplierName').value.trim()), updated_at: new Date().toISOString() };
+    closeModal();
+    await act(async () => ok(await sb.from('products').update(row).eq('code', code)), 'Uloženo ✓');
   };
 }
 
-// ---------- bindings ----------
+// ---------- bindings (záložky) ----------
 function bind() {
   const V = $('#view');
-  V.querySelectorAll('select[data-assign]').forEach(sel => sel.onchange = async () => {
+  V.querySelectorAll('[data-ofilter]').forEach(b => b.onclick = () => { ui.orderFilter = b.dataset.ofilter; render(); });
+  V.querySelectorAll('[data-afilter]').forEach(b => b.onclick = () => { ui.aufFilter = b.dataset.afilter; render(); });
+  V.querySelectorAll('[data-togglepast]').forEach(b => b.onclick = () => { ui.showPast = !ui.showPast; render(); });
+  V.querySelectorAll('select[data-assign]').forEach(sel => sel.onchange = () => {
     const code = sel.dataset.assign;
     if (sel.value === '__new') return editSupplier('', code);
-    await api('PUT', '/api/products', { code, data: { supplierId: sel.value } });
-    toast('Přiřazeno ✓'); render();
+    act(async () => ok(await sb.from('products').update({ skip: sel.value === 'none', supplier_id: sel.value && sel.value !== 'none' ? sel.value : null, updated_at: new Date().toISOString() }).eq('code', code)), 'Uloženo ✓');
   });
-  V.querySelectorAll('[data-email]').forEach(b => b.onclick = () => openEmail(b.dataset.email));
-  V.querySelectorAll('[data-all]').forEach(cb => cb.onchange = () => V.querySelectorAll(`[data-pick="${cb.dataset.all}"]`).forEach(x => x.checked = cb.checked));
   V.querySelectorAll('[data-editprod]').forEach(b => b.onclick = () => editProduct(b.dataset.editprod));
   V.querySelectorAll('[data-editsup]').forEach(b => b.onclick = () => editSupplier(b.dataset.editsup));
-  V.querySelectorAll('[data-delsup]').forEach(b => b.onclick = async () => {
+  V.querySelectorAll('[data-delsup]').forEach(b => b.onclick = () => {
     const s = supplierById(b.dataset.delsup);
     if (!confirm(`Smazat dodavatele ${s.name}? Jeho produkty budou bez dodavatele.`)) return;
-    await api('DELETE', '/api/suppliers/' + s.id); render();
+    act(async () => ok(await sb.from('suppliers').delete().eq('id', s.id)), 'Smazáno');
   });
-  V.querySelectorAll('[data-ordered]').forEach(cb => cb.onchange = async () => { await api('PUT', '/api/ordered', { key: cb.dataset.ordered, ordered: cb.checked }); render(); });
-  V.querySelectorAll('[data-toggle-none]').forEach(b => b.onclick = () => { ui.showNone = !ui.showNone; render(); });
-  V.querySelectorAll('[data-histtoggle]').forEach(b => b.onclick = () => { ui.histOpen[b.dataset.histtoggle] = !ui.histOpen[b.dataset.histtoggle]; render(); });
-  V.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => { const bt = S.batches.find(x => x.id === b.dataset.b); copyText(bt[b.dataset.copy]); });
-  V.querySelectorAll('[data-delbatch]').forEach(b => b.onclick = async () => {
-    if (!confirm('Zrušit tuto objednávku? Položky se vrátí do „K objednání“.')) return;
-    await api('DELETE', '/api/batches/' + b.dataset.delbatch); render();
+  V.querySelectorAll('[data-editship]').forEach(b => b.onclick = () => editShipment(b.dataset.editship));
+  V.querySelectorAll('[data-delship]').forEach(b => b.onclick = () => {
+    if (!confirm('Smazat svoz? AUFy v něm se vrátí mezi „bez svozu“.')) return;
+    const id = b.dataset.delship;
+    act(async () => { ok(await sb.from('aufs').update({ shipment_id: null }).eq('shipment_id', id)); ok(await sb.from('shipments').delete().eq('id', id)); await SJCalendar.remove('shipment:' + id); }, 'Svoz smazán');
   });
+  V.querySelectorAll('[data-addauf]').forEach(sel => sel.onchange = () => {
+    if (!sel.value) return;
+    const sid = sel.dataset.addauf;
+    act(async () => { ok(await sb.from('aufs').update({ shipment_id: sid }).eq('id', sel.value)); await syncShipmentEvent(sid); }, 'Přidáno do svozu ✓');
+  });
+  V.querySelectorAll('[data-unship]').forEach(b => b.onclick = () => {
+    const a = aufById(b.dataset.unship);
+    act(async () => { ok(await sb.from('aufs').update({ shipment_id: null }).eq('id', a.id)); await syncShipmentEvent(a.shipmentId); }, 'Odebráno ze svozu');
+  });
+  bindAufs();
   const ps = $('#prod-search');
   if (ps) ps.oninput = () => { ui.search = ps.value; const pos = ps.selectionStart; render(); const n = $('#prod-search'); n.focus(); n.setSelectionRange(pos, pos); };
   const ss = $('#save-settings');
-  if (ss) ss.onclick = async () => {
-    const data = { mapping: { ...S.settings.mapping } };
-    for (const k of ['csvUrl', 'productsCsvUrl', 'deeplKey', 'statusValue', 'companyName', 'subjectTemplate', 'extraNote', 'signature']) data[k] = $('#s-' + k).value;
-    V.querySelectorAll('[data-map]').forEach(sel => data.mapping[sel.dataset.map] = sel.value);
+  if (ss) ss.onclick = () => {
+    const mp = { ...S.settings.mapping };
+    V.querySelectorAll('[data-map]').forEach(sel => mp[sel.dataset.map] = sel.value);
+    const g = k => $('#s-' + k).value;
     ss.disabled = true; ss.textContent = 'Ukládám…';
-    await api('PUT', '/api/settings', data); toast('Nastavení uloženo ✓'); render();
+    act(async () => {
+      ok(await sb.from('settings').update({ csv_url: g('csvUrl'), products_csv_url: g('productsCsvUrl'), deepl_api_key: g('deeplKey').trim(), status_value: g('statusValue'), mapping: mp,
+        company_name: g('companyName'), subject_template: g('subjectTemplate'), extra_note: g('extraNote'), signature: g('signature'), last_sync_at: null }).eq('id', 1));
+      await requestSync();
+    }, 'Nastavení uloženo ✓');
   };
 }
 
 // ---------- login ----------
 function renderLogin(msg = '', email = '') {
-  $('#crumb').innerHTML = '';
-  $('#user').innerHTML = '';
+  $('#crumb').innerHTML = ''; $('#user').innerHTML = '';
   $('#view').innerHTML = `
     <section class="hero" style="max-width:420px;margin:0 auto">
       <img src="logo.png" alt="" width="84" height="84" style="display:block;margin-bottom:18px">
@@ -676,9 +902,9 @@ function renderLogin(msg = '', email = '') {
   $('#login').onsubmit = async e => {
     e.preventDefault();
     const btn = e.target.querySelector('button'); btn.disabled = true; btn.textContent = 'Přihlašuji…';
-    const email = $('#l-email').value.trim();
-    const { error } = await sb.auth.signInWithPassword({ email, password: $('#l-pass').value });
-    if (error) { renderLogin(error.message === 'Invalid login credentials' ? 'Špatný e-mail nebo heslo.' : error.message, email); $('#l-pass').focus(); }
+    const em = $('#l-email').value.trim();
+    const { error } = await sb.auth.signInWithPassword({ email: em, password: $('#l-pass').value });
+    if (error) { renderLogin(error.message === 'Invalid login credentials' ? 'Špatný e-mail nebo heslo.' : error.message, em); $('#l-pass').focus(); }
   };
 }
 function renderUser(session) {
@@ -689,14 +915,14 @@ function renderUser(session) {
 // ---------- start ----------
 let session = null;
 window.addEventListener('hashchange', () => { if (!session) return; closeModal(); render(); window.scrollTo(0, 0); });
-async function load() { try { await api('GET', '/api/state'); } catch {} render(); }
+async function load() { try { await loadState(); } catch (e) { toast('Chyba: ' + e.message); } render(); }
 sb.auth.onAuthStateChange((_ev, s) => {
   const was = session; session = s;
   if (!s) { S = null; return renderLogin(); }
   renderUser(s);
-  if (!was) setTimeout(() => { render(); load(); }, 0); // mimo callback (doporučení Supabase)
+  if (!was) setTimeout(() => { render(); load(); }, 0);
 });
-// obnova dat každou minutu (jen když uživatel zrovna nic nevyplňuje)
+// obnova dat každou minutu (ne když zrovna něco vyplňuješ)
 setInterval(() => {
   if (!session || busy || document.hidden || $('#modal-root').innerHTML) return;
   const a = document.activeElement;
@@ -704,4 +930,4 @@ setInterval(() => {
   if (route().tab === 'nastaveni') return;
   load();
 }, 60e3);
-document.addEventListener('visibilitychange', () => { if (session && !document.hidden && !$('#modal-root').innerHTML) load(); });
+document.addEventListener('visibilitychange', () => { if (session && !document.hidden && !$('#modal-root').innerHTML && !busy) load(); });
