@@ -460,7 +460,7 @@ function tabSettings() {
   </div>
 
   <div class="card stack">
-    <div><h2>E-mail pro dodavatele</h2><div class="sub">Šablona objednávkového e-mailu (anglicky). V předmětu můžeš použít {company}, {date}, {supplier}.</div></div>
+    <div><h2>E-mail pro dodavatele</h2><div class="sub">Šablona objednávkového e-mailu (anglicky). V předmětu i doplňující větě můžeš použít {orders} (čísla našich objednávek), {company}, {date}, {supplier}.</div></div>
     <div class="grid-2">
       <label class="field"><span>Název firmy</span><input type="text" id="s-companyName" value="${esc(st.companyName)}"></label>
       <label class="field"><span>Předmět</span><input type="text" id="s-subjectTemplate" value="${esc(st.subjectTemplate)}"></label>
@@ -470,7 +470,7 @@ function tabSettings() {
     ${(() => { const t = st.translateInfo || {}; if (!t.at) return '';
       return t.error ? `<div class="small" style="color:var(--bad)">Překlad (${esc(t.provider)}): ${esc(t.error)} · ${fmtDate(t.at)}</div>`
         : `<div class="small muted">Poslední překlad: ${esc(t.provider === 'deepl' ? 'DeepL' : 'MyMemory')} · ${t.done} názvů · ${fmtDate(t.at)}</div>`; })()}
-    <label class="field"><span>Doplňující věta (volitelné, EN)</span><textarea id="s-extraNote" placeholder="e.g. Please deliver to our warehouse in …">${esc(st.extraNote)}</textarea></label>
+    <label class="field"><span>Doplňující věta (volitelné, EN)</span><textarea id="s-extraNote" placeholder="e.g. Our order reference: {orders}">${esc(st.extraNote)}</textarea></label>
     <label class="field"><span>Podpis</span><textarea id="s-signature">${esc(st.signature)}</textarea></label>
   </div>
   <div class="row" style="justify-content:flex-end"><button class="btn primary" id="save-settings">Uložit nastavení</button></div>`;
@@ -483,8 +483,11 @@ function buildEmail(sid, codes, includeRefs) {
   const g = groupsToOrder().get(sid);
   const picked = [...g.values()].filter(p => codes.includes(p.code));
   const date = new Date().toLocaleDateString('en-GB');
-  const subject = (st.subjectTemplate || 'Purchase order – {company} – {date}')
-    .replaceAll('{company}', st.companyName || '').replaceAll('{date}', date).replaceAll('{supplier}', s.name);
+  // čísla našich objednávek, ze kterých vybrané položky pocházejí
+  const orders = [...new Set(picked.flatMap(p => p.items.map(x => x.orderCode)))].sort().join(', ');
+  const fill = t => String(t || '').replaceAll('{company}', st.companyName || '').replaceAll('{date}', date)
+    .replaceAll('{supplier}', s.name).replaceAll('{orders}', orders).replaceAll('{order}', orders);
+  const subject = fill(st.subjectTemplate || 'Purchase order – {company} – {date}');
   // stejné MPN u více řádků (např. délkové varianty) → přidej i náš kód, ať je to jednoznačné
   const mpnCount = {}; for (const p of picked) { const c = supCode(p.code); mpnCount[c] = (mpnCount[c] || 0) + 1; }
   const lines = picked.map((p, i) => {
@@ -501,7 +504,7 @@ function buildEmail(sid, codes, includeRefs) {
     `we would like to place the following order${s.customerNo ? ` (customer no. ${s.customerNo})` : ''}:`, '',
     ...lines, '',
     'Please confirm the order and let us know the expected delivery date.',
-    ...(st.extraNote ? ['', st.extraNote] : []),
+    ...(st.extraNote ? ['', fill(st.extraNote)] : []),
     '', 'Thank you in advance.', '',
     st.signature || '',
   ].join('\n');
