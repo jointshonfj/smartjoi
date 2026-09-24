@@ -4,6 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0a0a0a">
+  <script>
+    // motiv nastav hned, ať stránka neproblikne (auto = podle systému)
+    try { const t = localStorage.getItem('sj-theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
   <meta name="robots" content="noindex, nofollow">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
@@ -22,7 +26,10 @@
       <span class="brand-text">SmartJoi<small>by Jointshon | FJ</small></span>
     </a>
     <nav id="crumb" class="crumb"></nav>
-    <div id="user" style="margin-left:auto"></div>
+    <div class="row" style="margin-left:auto;gap:8px">
+      <button class="btn ghost theme-btn" id="theme" title="Motiv" aria-label="Přepnout světlý / tmavý režim">◐</button>
+      <div id="user"></div>
+    </div>
   </header>
   <main id="view"><div class="empty">Načítám…</div></main>
   <div id="modal-root"></div>

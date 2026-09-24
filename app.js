@@ -103,8 +103,8 @@ async function loadState() {
     settings: { csvUrl: st.csv_url, statusValue: st.status_value, mapping: st.mapping || {}, companyName: st.company_name, subjectTemplate: st.subject_template, extraNote: st.extra_note, signature: st.signature, productsCsvUrl: st.products_csv_url || '', productsSyncInfo: st.products_sync_info || {}, deeplKey: st.deepl_api_key || '', translateInfo: st.translate_info || {}, calendarToken: st.calendar_token || '' },
     suppliers: sups.map(s => ({ id: s.id, name: s.name, country: s.country, email: s.email, contact: s.contact, customerNo: s.customer_no, notes: s.notes })),
     products,
-    orders: orders.map(o => ({ code: o.code, date: o.order_date, customer: o.customer, shoptetStatus: o.shoptet_status, active: o.active, note: o.note || '', archived: o.archived })),
-    items: items.map(i => ({ key: i.key, orderCode: i.order_code, code: i.code, name: i.name, qty: Number(i.qty), unit: i.unit, active: i.active, decision: i.decision, supplierId: i.supplier_id || '', aufId: i.auf_id || '' })),
+    orders: orders.map(o => ({ code: o.code, date: o.order_date, customer: o.customer, shoptetStatus: o.shoptet_status, active: o.active, note: o.note || '', archived: o.archived, manual: !!o.manual })),
+    items: items.map(i => ({ key: i.key, orderCode: i.order_code, code: i.code, name: i.name, qty: Number(i.qty), unit: i.unit, active: i.active, decision: i.decision, supplierId: i.supplier_id || '', aufId: i.auf_id || '', manual: !!i.manual })),
     aufs: aufs.map(a => ({ id: a.id, orderCode: a.order_code, supplierId: a.supplier_id || '', status: a.status, to: a.email_to, subject: a.subject, body: a.body, lines: a.lines || [], sentAt: a.sent_at, aufNumber: a.auf_number || '', amount: a.amount_eur == null ? null : Number(a.amount_eur), confirmedAt: a.confirmed_at, note: a.note || '', shipmentId: a.shipment_id || '', createdAt: a.created_at })),
     shipments: ships.map(s => ({ id: s.id, date: s.ship_date || '', note: s.note || '' })),
     events,
@@ -139,6 +139,8 @@ const supName = id => supplierById(id)?.name || '(bez dodavatele)';
 const prod = code => S.products[code] || {};
 const supCode = code => prod(code).supplierCode || prod(code).mpn || code;     // kód do e-mailu
 const enName = code => prod(code).supplierName || prod(code).nameEn || '';     // název do e-mailu
+// kód, který SmartJoi vymyslí pro ruční položku bez kódu (do e-mailu se nepíše)
+const genCode = c => /^M-[A-Z0-9]{6}$/.test(c || '');
 const orderByCode = code => S.orders.find(o => o.code === code);
 const aufById = id => S.aufs.find(a => a.id === id);
 const aufsOf = code => S.aufs.filter(a => a.orderCode === code);
@@ -320,6 +322,7 @@ function tabOrders() {
     </div>
     <div class="row" style="margin-bottom:12px">
       <div class="chips"><button class="chip ${!archived ? 'on' : ''}" data-ofilter="active">Aktivní</button><button class="chip ${archived ? 'on' : ''}" data-ofilter="archive">Archiv</button></div>
+      <div class="grow"></div><button class="btn sm" data-neworder>＋ Ruční objednávka</button>
     </div>`;
   if (!list.length) return h + `<div class="card empty"><div class="big">✓</div><b>${archived ? 'Archiv je prázdný.' : `Žádné objednávky ve stavu „${esc(S.settings.statusValue)}“.`}</b><div class="small">${!archived && S.sync.fetchedAt ? 'Poslední načtení ' + ago(S.sync.fetchedAt) + '.' : ''}</div></div>`;
   h += `<div class="card" style="padding:6px 0"><div class="olist">${list.map(({ o, st }) => {
@@ -327,7 +330,7 @@ function tabOrders() {
     const sups = [...new Set(its.filter(i => effDec(i) === 'order' && effSup(i)).map(effSup))];
     const aufs = aufsOf(o.code).filter(a => a.aufNumber);
     return `<a class="orow" href="#/objednavky/o/${encodeURIComponent(o.code)}">
-      <div class="grow"><div class="row" style="gap:8px"><b>${esc(o.code)}</b>${o.note ? '<span title="Má poznámku">📝</span>' : ''}${!o.active && o.shoptetStatus ? `<span class="sub">Shoptet: ${esc(o.shoptetStatus)}</span>` : ''}</div>
+      <div class="grow"><div class="row" style="gap:8px"><b>${esc(o.code)}</b>${o.manual ? '<span class="badge">ručně</span>' : ''}${o.note ? '<span title="Má poznámku">📝</span>' : ''}${!o.manual && !o.active && o.shoptetStatus ? `<span class="sub">Shoptet: ${esc(o.shoptetStatus)}</span>` : ''}</div>
         <div class="sub">${esc(o.customer || '')}${o.customer && o.date ? ' · ' : ''}${esc(String(o.date).slice(0, 10))} · ${plural(its.length, 'položka', 'položky', 'položek')}${sups.length ? ' · ' + sups.map(s => `${flag(supplierById(s)?.country)} ${esc(supName(s))}`).join(', ') : ''}${aufs.length ? ' · AUF ' + aufs.map(a => esc(a.aufNumber)).join(', ') : ''}</div></div>
       <span class="badge ${STATE[st][1]}">${STATE[st][0]}</span><span class="chev">›</span></a>`;
   }).join('')}</div></div>`;
@@ -351,26 +354,28 @@ function renderOrderDetail(code) {
     <div class="page-head">
       <div><a class="small muted" href="#/objednavky" style="text-decoration:none">← Objednávky</a>
         <h1>${esc(o.code)}</h1>
-        <div class="sub">${esc(o.customer || '')}${o.customer && o.date ? ' · ' : ''}${esc(o.date || '')} · Shoptet: ${esc(o.shoptetStatus || '—')}</div></div>
+        <div class="sub">${esc(o.customer || '')}${o.customer && o.date ? ' · ' : ''}${esc(o.date || '')} · ${o.manual ? 'ruční objednávka (mimo Shoptet)' : 'Shoptet: ' + esc(o.shoptetStatus || '—')}</div></div>
       <div class="row"><span class="badge ${STATE[st][1]}">${STATE[st][0]}</span>
+        ${o.manual ? `<button class="btn sm ghost" id="o-edit">✎ Upravit</button>${aufs.some(a => a.status !== 'draft') ? '' : '<button class="btn sm ghost" id="o-delete">🗑 Smazat</button>'}` : ''}
         <button class="btn sm ghost" id="o-archive">${o.archived ? '↩ Obnovit z archivu' : '🗄 Archivovat'}</button></div>
     </div>
 
     <div class="card">
-      <div class="card-head"><div><h2>Položky</h2><div class="sub">Zaškrtni, co objednáváš, a u koho. Dodavatel se u produktu zapamatuje pro příště.</div></div></div>
-      ${!its.length ? '<div class="empty">Objednávka nemá položky ke zboží.</div>' : `
+      <div class="card-head"><div><h2>Položky</h2><div class="sub">Zaškrtni, co objednáváš, a u koho. Dodavatel se u produktu zapamatuje pro příště.</div></div>
+        ${o.manual ? '<button class="btn sm" id="o-additem">＋ Přidat položku</button>' : ''}</div>
+      ${!its.length ? `<div class="empty">${o.manual ? 'Zatím žádné položky — přidej je tlačítkem „＋ Přidat položku“.' : 'Objednávka nemá položky ke zboží.'}</div>` : `
       <div class="table-wrap"><table class="items">
-        <thead><tr><th style="width:34px" title="Objednat">Obj.</th><th>Kód · MPN</th><th>Produkt</th><th class="num">Množství</th><th style="width:210px">Dodavatel</th></tr></thead>
+        <thead><tr><th style="width:34px" title="Objednat">Obj.</th><th>Kód · MPN</th><th>Produkt</th><th class="num">Množství</th><th style="width:210px">Dodavatel</th>${o.manual ? '<th style="width:36px"></th>' : ''}</tr></thead>
         <tbody>${its.map(i => {
           const p = prod(i.code), dec = effDec(i), a = i.aufId ? aufById(i.aufId) : null;
           return `<tr class="${dec === 'skip' ? 'done' : ''}">
             <td><input type="checkbox" data-dec="${esc(i.key)}" ${dec === 'order' ? 'checked' : ''} ${locked(i) ? 'disabled' : ''} title="${dec === 'skip' ? 'Neobjednává se' : 'Objednat'}"></td>
-            <td><code>${esc(i.code)}</code>${p.mpn ? `<div class="sub">MPN ${esc(p.mpn)}</div>` : ''}</td>
-            <td>${esc(i.name)}${enName(i.code) ? `<div class="sub">${esc(enName(i.code))}</div>` : ''}${!i.active ? '<div class="sub" style="color:var(--warn)">už není v objednávce ve Shoptetu</div>' : ''}</td>
+            <td>${genCode(i.code) ? '<span class="muted small">bez kódu</span>' : `<code>${esc(i.code)}</code>`}${p.mpn ? `<div class="sub">MPN ${esc(p.mpn)}</div>` : ''}</td>
+            <td>${esc(i.name)}${enName(i.code) ? `<div class="sub">${esc(enName(i.code))}</div>` : ''}${!i.active && !i.manual ? '<div class="sub" style="color:var(--warn)">už není v objednávce ve Shoptetu</div>' : ''}</td>
             <td class="num"><b>${fmtQty(i.qty)}</b> ${esc(i.unit)}</td>
             <td>${dec === 'skip' ? '<span class="muted small">neobjednává se</span>' : a
               ? `<span class="small">${flag(supplierById(a.supplierId)?.country)} ${esc(supName(a.supplierId))}</span><div class="sub">${a.aufNumber ? 'AUF ' + esc(a.aufNumber) : esc(AUF_STATE[a.status][0])}</div>`
-              : `<select data-isup="${esc(i.key)}">${supOptions(effSup(i))}</select>${!effSup(i) && p.shoptetSupplier ? `<div class="sub">Shoptet: ${esc(p.shoptetSupplier)}</div>` : ''}`}</td></tr>`;
+              : `<select data-isup="${esc(i.key)}">${supOptions(effSup(i))}</select>${!effSup(i) && p.shoptetSupplier ? `<div class="sub">Shoptet: ${esc(p.shoptetSupplier)}</div>` : ''}`}</td>${o.manual ? `<td>${i.manual && !i.aufId ? `<button class="icon-btn" data-delitem="${esc(i.key)}" title="Odebrat položku">🗑</button>` : ''}</td>` : ''}</tr>`;
         }).join('')}</tbody></table></div>`}
     </div>
 
@@ -415,6 +420,142 @@ function bindOrderDetail(o) {
     });
   });
   V.querySelectorAll('[data-mkauf]').forEach(b => b.onclick = () => createAuf(o.code, b.dataset.mkauf));
+  if (!o.manual) return;
+  $('#o-edit').onclick = () => editManualOrder(o.code);
+  $('#o-additem').onclick = () => addManualItems(o.code);
+  if ($('#o-delete')) $('#o-delete').onclick = () => {
+    if (!confirm(`Smazat ruční objednávku ${o.code} i s položkami a rozepsanými e-maily?`)) return;
+    act(async () => {
+      ok(await sb.from('order_items').delete().eq('order_code', o.code));
+      ok(await sb.from('orders').delete().eq('code', o.code));
+    }, 'Objednávka smazána').then(() => { if (!orderByCode(o.code)) location.hash = '#/objednavky'; });
+  };
+  V.querySelectorAll('[data-delitem]').forEach(b => b.onclick = () => {
+    const it = S.items.find(i => i.key === b.dataset.delitem);
+    if (!confirm(`Odebrat položku ${it.name || it.code}?`)) return;
+    act(async () => ok(await sb.from('order_items').delete().eq('key', it.key)), 'Položka odebrána');
+  });
+}
+
+// --- ruční objednávka (mimo Shoptet)
+const itemRow = (r = {}) => `<div class="mi-row">
+  <input type="text" class="mi-code" placeholder="Náš kód" value="${esc(r.code || '')}">
+  <input type="text" class="mi-mpn" placeholder="MPN / kód dodavatele" value="${esc(r.mpn || '')}">
+  <input type="text" class="mi-name" placeholder="Název (CZ i EN) *" value="${esc(r.name || '')}">
+  <input type="text" class="mi-qty" inputmode="decimal" placeholder="Ks" value="${esc(r.qty ?? '1')}">
+  <input type="text" class="mi-unit" placeholder="Jedn." value="${esc(r.unit ?? 'ks')}">
+  <button class="icon-btn mi-del" title="Odebrat řádek">✕</button></div>`;
+function itemRowsHtml() {
+  return `<div class="stack" style="gap:8px"><div class="mi-head small muted"><span>Náš kód</span><span>MPN / kód dodavatele</span><span>Název *</span><span>Množství</span><span>Jedn.</span><span></span></div>
+    <div id="mi-rows">${itemRow()}</div>
+    <div><button class="btn sm ghost" id="mi-add">＋ Další položka</button></div>
+    <div class="small muted">Stačí název a množství. Když vyplníš náš kód existujícího produktu, doplní se dodavatel, MPN i anglický název samy.</div></div>`;
+}
+function bindItemRows() {
+  const root = $('#mi-rows');
+  const wire = () => root.querySelectorAll('.mi-del').forEach(b => b.onclick = () => { b.closest('.mi-row').remove(); if (!root.children.length) { root.insertAdjacentHTML('beforeend', itemRow()); wire(); } });
+  $('#mi-add').onclick = () => { root.insertAdjacentHTML('beforeend', itemRow()); wire(); root.lastElementChild.querySelector('.mi-code').focus(); };
+  root.addEventListener('change', e => {
+    if (!e.target.classList.contains('mi-code')) return;
+    const row = e.target.closest('.mi-row'), p = S.products[e.target.value.trim()];
+    if (p && !row.querySelector('.mi-name').value) row.querySelector('.mi-name').value = p.name || '';
+  });
+  wire();
+}
+function readItemRows() {
+  const rows = [];
+  for (const r of $('#mi-rows').querySelectorAll('.mi-row')) {
+    const g = c => r.querySelector(c).value.trim();
+    const code = g('.mi-code'), mpn = g('.mi-mpn'), name = g('.mi-name'), qty = Number(g('.mi-qty').replace(',', '.')), unit = g('.mi-unit');
+    if (!code && !mpn && !name) continue;
+    if (!name && !(code && S.products[code])) throw new Error('Vyplň název u každé položky');
+    if (!(qty > 0)) throw new Error('Množství musí být větší než 0');
+    rows.push({ code, mpn, name: name || S.products[code].name, qty, unit });
+  }
+  return rows;
+}
+async function saveManualItems(orderCode, rows, date, customer) {
+  const now = new Date().toISOString();
+  const taken = new Set(S.items.filter(i => i.orderCode === orderCode).map(i => i.key));
+  const items = [], newProds = [];
+  for (const r of rows) {
+    let code = r.code || r.mpn;
+    if (!code) code = 'M-' + Math.random().toString(36).slice(2, 8).toUpperCase();
+    let key = orderCode + '|' + code;
+    if (taken.has(key)) throw new Error(`Položka ${code} už v objednávce je`);
+    taken.add(key);
+    if (!S.products[code]) newProds.push({ code, name: r.name, supplier_code: r.mpn && r.mpn !== code ? r.mpn : '', updated_at: now });
+    items.push({ key, order_code: orderCode, code, name: r.name, qty: r.qty, unit: r.unit, order_date: date || '', customer: customer || '', active: true, manual: true, decision: 'order', first_seen: now, last_seen: now });
+  }
+  if (newProds.length) ok(await sb.from('products').upsert(newProds, { onConflict: 'code', ignoreDuplicates: true }));
+  if (items.length) ok(await sb.from('order_items').insert(items));
+  // nové produkty → na pozadí doplnit anglický název (a MPN, pokud je produkt ve Shoptetu)
+  if (newProds.length) sb.rpc('request_shoptet_sync', { task: 'orders' }).then(() => {}, () => {});
+}
+function suggestManualCode() {
+  const d = new Date(), base = 'R-' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+  let n = 1; while (orderByCode(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
+function editManualOrder(code) {
+  const o = code ? orderByCode(code) : null;
+  const today = new Date().toISOString().slice(0, 10);
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:760px">
+    <div class="modal-head"><h2>${o ? 'Upravit ruční objednávku' : 'Ruční objednávka'}</h2><button class="icon-btn" data-close>✕</button></div>
+    ${o ? '' : '<p class="muted small" style="margin-top:0">Pro objednávky, které nepřišly přes Shoptet — dál s ní pracuješ úplně stejně (e-mail, AUF, svoz).</p>'}
+    <div class="stack">
+      <div class="grid-2">
+        <label class="field"><span>Číslo / reference objednávky *</span><input type="text" id="mo-code" value="${esc(o ? o.code : suggestManualCode())}" ${o ? 'disabled' : ''}></label>
+        <label class="field"><span>Datum</span><input type="date" id="mo-date" value="${esc(o ? String(o.date).slice(0, 10) : today)}"></label>
+      </div>
+      <label class="field"><span>Zákazník / pro koho</span><input type="text" id="mo-customer" value="${esc(o ? o.customer : '')}" placeholder="např. jméno zákazníka, sklad, výstava…"></label>
+      ${o ? '' : `<label class="field"><span>Poznámka</span><textarea id="mo-note" placeholder="Odkud objednávka přišla, reference…"></textarea></label>
+      <div><h3 style="margin:6px 0 8px">Položky</h3>${itemRowsHtml()}</div>`}
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="mo-save">${o ? 'Uložit' : 'Vytvořit objednávku'}</button></div>
+  </div></div>`;
+  $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = () => { closeModal(); render(); });
+  if (!o) { bindItemRows(); $('#mo-code').select(); }
+  $('#mo-save').onclick = async () => {
+    const date = $('#mo-date').value, customer = $('#mo-customer').value.trim();
+    if (o) {
+      closeModal();
+      return act(async () => {
+        ok(await sb.from('orders').update({ order_date: date, customer, updated_at: new Date().toISOString() }).eq('code', o.code));
+        ok(await sb.from('order_items').update({ order_date: date, customer }).eq('order_code', o.code));
+      }, 'Uloženo ✓');
+    }
+    const newCode = $('#mo-code').value.trim(), note = $('#mo-note').value.trim();
+    let rows;
+    try {
+      if (!newCode) throw new Error('Vyplň číslo / referenci objednávky');
+      if (/[|/#?]/.test(newCode)) throw new Error('Číslo objednávky nesmí obsahovat znaky | / # ?');
+      rows = readItemRows();
+      const { data: ex } = await sb.from('orders').select('code,manual').eq('code', newCode).maybeSingle();
+      if (ex || orderByCode(newCode)) throw new Error(`Objednávka ${newCode} už v SmartJoi je`);
+    } catch (e) { return toast(e.message); }
+    closeModal();
+    await act(async () => {
+      ok(await sb.from('orders').insert({ code: newCode, order_date: date, customer, note, manual: true, active: true, shoptet_status: '' }));
+      await saveManualItems(newCode, rows, date, customer);
+    }, 'Objednávka vytvořena ✓');
+    if (orderByCode(newCode)) location.hash = '#/objednavky/o/' + encodeURIComponent(newCode);
+  };
+}
+function addManualItems(code) {
+  const o = orderByCode(code);
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:760px">
+    <div class="modal-head"><h2>Přidat položky · ${esc(code)}</h2><button class="icon-btn" data-close>✕</button></div>
+    ${itemRowsHtml()}
+    <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="mi-save">Přidat</button></div>
+  </div></div>`;
+  $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = closeModal);
+  bindItemRows(); $('#mi-rows .mi-code').focus();
+  $('#mi-save').onclick = async () => {
+    let rows; try { rows = readItemRows(); if (!rows.length) throw new Error('Vyplň aspoň jednu položku'); } catch (e) { return toast(e.message); }
+    closeModal();
+    await act(() => saveManualItems(code, rows, o.date, o.customer), 'Položky přidány ✓');
+  };
 }
 
 // ---------- AUF (objednávka u dodavatele) ----------
@@ -432,7 +573,7 @@ function renderAuf(a, { showOrder = false } = {}) {
       ${a.amount != null ? `<div class="auf-no"><div class="sub">Částka</div><b>${eur(a.amount)}</b></div>` : ''}
       <span class="badge ${AUF_STATE[a.status][1]}">${AUF_STATE[a.status][0]}</span>
     </div>
-    <div class="auf-lines small muted">${a.lines.map(l => `${esc(l.code)} × ${fmtQty(l.qty)}`).join(' · ')}</div>
+    <div class="auf-lines small muted">${a.lines.map(l => `${esc(l.code || l.name)} × ${fmtQty(l.qty)}`).join(' · ')}</div>
     ${a.status === 'draft' ? `<div class="row"><button class="btn primary sm" data-aufmail="${a.id}">✉ Otevřít e-mail</button><button class="btn sm ghost danger" data-aufdel="${a.id}">Zrušit</button></div>` : `
     <div class="auf-form">
       <label class="field"><span>AUF číslo (od dodavatele)</span><input type="text" data-aufno="${a.id}" value="${esc(a.aufNumber)}" placeholder="např. 4711234"></label>
@@ -520,8 +661,9 @@ function buildEmail(order, sid, items, includeRefs) {
     .replaceAll('{supplier}', s.name || '').replaceAll('{orders}', order.code).replaceAll('{order}', order.code);
   const mpnCount = {}; for (const i of items) { const c = supCode(i.code); mpnCount[c] = (mpnCount[c] || 0) + 1; }
   const lines = items.map((i, n) => {
-    const code = supCode(i.code);
-    let l = `${n + 1}. ${code}${mpnCount[code] > 1 && code !== i.code ? ` (${i.code})` : ''}${enName(i.code) ? ' – ' + enName(i.code) : ''} – ${fmtQtyEn(i.qty)} ${unitEn(i.unit)}`;
+    const code = supCode(i.code), nm = enName(i.code) || (i.manual ? i.name : '');
+    const head = genCode(code) ? '' : `${code}${mpnCount[code] > 1 && code !== i.code ? ` (${i.code})` : ''}`;
+    let l = `${n + 1}. ${[head, nm].filter(Boolean).join(' – ')} – ${fmtQtyEn(i.qty)} ${unitEn(i.unit)}`;
     if (includeRefs) l += `  (ref.: ${order.code})`;
     return l;
   });
@@ -535,7 +677,7 @@ function buildEmail(order, sid, items, includeRefs) {
   ].join('\n');
   return {
     to: s.email || '', subject: fill(st.subjectTemplate || 'Purchase order {orders} – {company}'), body,
-    lines: items.map(i => ({ code: supCode(i.code), ourCode: i.code, name: enName(i.code) || i.name, qty: i.qty, unit: i.unit, key: i.key })),
+    lines: items.map(i => ({ code: genCode(supCode(i.code)) ? '' : supCode(i.code), ourCode: i.code, name: enName(i.code) || i.name, qty: i.qty, unit: i.unit, key: i.key })),
   };
 }
 async function createAuf(orderCode, sid) {
@@ -837,6 +979,7 @@ function editProduct(code) {
 function bind() {
   const V = $('#view');
   V.querySelectorAll('[data-ofilter]').forEach(b => b.onclick = () => { ui.orderFilter = b.dataset.ofilter; render(); });
+  V.querySelectorAll('[data-neworder]').forEach(b => b.onclick = () => editManualOrder(''));
   V.querySelectorAll('[data-afilter]').forEach(b => b.onclick = () => { ui.aufFilter = b.dataset.afilter; render(); });
   V.querySelectorAll('[data-togglepast]').forEach(b => b.onclick = () => { ui.showPast = !ui.showPast; render(); });
   V.querySelectorAll('select[data-assign]').forEach(sel => sel.onchange = () => {
@@ -911,6 +1054,29 @@ function renderUser(session) {
   $('#user').innerHTML = `<button class="btn sm ghost" id="logout" title="${esc(session.user.email)}">Odhlásit</button>`;
   $('#logout').onclick = () => sb.auth.signOut();
 }
+
+// ---------- světlý / tmavý režim ----------
+const THEMES = ['auto', 'light', 'dark'];
+const ICON = p => `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const THEME_UI = {
+  auto: [ICON('<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/>'), 'Motiv: podle systému'],
+  light: [ICON('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'), 'Motiv: světlý'],
+  dark: [ICON('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'), 'Motiv: tmavý'],
+};
+function getTheme() { try { return localStorage.getItem('sj-theme') || 'auto'; } catch { return 'auto'; } }
+function applyTheme(t) {
+  if (t === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
+  const dark = t === 'dark' || (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0a0a0a' : '#f4f4f2');
+  const b = $('#theme'); if (b) { b.innerHTML = THEME_UI[t][0]; b.title = THEME_UI[t][1] + ' (klikni pro změnu)'; }
+}
+$('#theme').onclick = () => {
+  const t = THEMES[(THEMES.indexOf(getTheme()) + 1) % THEMES.length];
+  try { localStorage.setItem('sj-theme', t); } catch {}
+  applyTheme(t); toast(THEME_UI[t][1]);
+};
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => applyTheme(getTheme()));
+applyTheme(getTheme());
 
 // ---------- start ----------
 let session = null;
