@@ -1332,6 +1332,7 @@ function openAufEmail(id) {
     </div>
     <div class="modal-foot">
       <button class="btn ghost" data-close>${draft ? 'Uložit a zavřít' : 'Zavřít'}</button>
+      <a class="btn ${draft ? '' : 'primary'}" id="m-mail" href="#">✉ Otevřít v Outlooku</a>
       ${draft ? `<button class="btn primary" id="m-sent">✓ Odesláno — čekám na AUF</button>` : ''}
     </div></div></div>`;
   const root = $('#modal-root');
@@ -1343,6 +1344,16 @@ function openAufEmail(id) {
   root.querySelectorAll('[data-close]').forEach(b => b.onclick = close);
   root.querySelector('.modal-back').onclick = e => { if (e.target.classList.contains('modal-back')) close(); };
   root.querySelectorAll('[data-mcopy]').forEach(b => b.onclick = e => { e.preventDefault(); copyText($('#' + b.dataset.mcopy).value); });
+  // otevře e-mail ve výchozím poštovním programu (Outlook) s vyplněnou adresou, předmětem i textem
+  $('#m-mail').onclick = () => {
+    const t = texts();
+    if (!t.email_to.trim()) toast('Chybí e-mail dodavatele — doplň ho do pole Komu');
+    $('#m-mail').href = mailtoLink({ to: t.email_to.trim(), cc: '', subject: t.subject, body: t.body });
+    if (draft) {
+      if (t.email_to !== a.to || t.subject !== a.subject || t.body !== a.body) { sb.from('aufs').update(t).eq('id', id).then(() => { Object.assign(a, { to: t.email_to, subject: t.subject, body: t.body }); }, () => {}); }
+      setTimeout(() => { toast('Po odeslání v Outlooku klikni na „✓ Odesláno“'); $('#m-sent')?.classList.add('pulse'); }, 400);
+    }
+  };
   if (draft) {
     $('#m-regen').onclick = () => {
       const items = a.lines.map(l => S.items.find(i => i.key === l.key)).filter(Boolean);
@@ -1755,14 +1766,73 @@ $('#theme').onclick = () => {
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => applyTheme(getTheme()));
 applyTheme(getTheme());
 
+// ---------- AI asistent (Gemini, Edge Function „assistant“) ----------
+const chat = { open: false, busy: false, contents: [], log: [], pending: null };
+try { const x = JSON.parse(sessionStorage.getItem('sj-chat') || 'null'); if (x) Object.assign(chat, { contents: x.contents || [], log: x.log || [], pending: x.pending || null }); } catch {}
+const chatSave = () => { try { sessionStorage.setItem('sj-chat', JSON.stringify({ contents: chat.contents.slice(-40), log: chat.log.slice(-60), pending: chat.pending })); } catch {} };
+// jednoduché formátování odpovědi: **tučně**, odkazy, zalomení
+const chatFmt = t => esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1">$1</a>').replace(/\n/g, '<br>');
+function chatRender() {
+  let root = $('#chat-root');
+  if (!root) { root = document.createElement('div'); root.id = 'chat-root'; document.body.appendChild(root); }
+  if (!session) { root.innerHTML = ''; return; }
+  if (!chat.open) { root.innerHTML = `<button class="chat-fab" id="chat-fab" title="AI asistent">✦<span>Asistent</span></button>`; $('#chat-fab').onclick = () => { chat.open = true; chatRender(); $('#chat-in')?.focus(); }; return; }
+  root.innerHTML = `<div class="chat-panel" role="dialog" aria-label="AI asistent">
+    <div class="chat-head"><b>✦ Asistent</b><span class="small muted grow">OrderJoi · StockJoi · EmailJoi</span>
+      <button class="icon-btn" id="chat-new" title="Nový rozhovor">⟲</button><button class="icon-btn" id="chat-close" title="Zavřít">✕</button></div>
+    <div class="chat-log" id="chat-log">
+      ${!chat.log.length ? `<div class="chat-hello"><b>Ahoj, s čím pomůžu?</b><div class="small muted">Třeba:</div>
+        ${['Co je potřeba objednat?', 'Které AUFy čekají na potvrzení?', 'Založ ruční objednávku…', 'Připrav zprávu pro sklad k nejbližšímu svozu'].map(q => `<button class="chip" data-chatq="${esc(q)}">${esc(q)}</button>`).join('')}</div>` : ''}
+      ${chat.log.map(m => `<div class="msg ${m.role}">${m.role === 'bot' ? chatFmt(m.text) : m.role === 'err' ? '⚠ ' + esc(m.text) : m.role === 'act' ? esc(m.text) : esc(m.text).replace(/\n/g, '<br>')}${m.role === 'bot' && m.text.length > 60 ? `<button class="msg-copy" data-chatcopy="${chat.log.indexOf(m)}" title="Kopírovat">⧉</button>` : ''}</div>`).join('')}
+      ${chat.pending ? `<div class="msg pending"><div class="small muted" style="margin-bottom:6px">Asistent chce provést:</div>${chat.pending.map(p => `<div class="pend">• ${esc(p.summary)}</div>`).join('')}
+        <div class="row" style="margin-top:10px;gap:8px"><button class="btn sm primary" id="chat-ok" ${chat.busy ? 'disabled' : ''}>✓ Provést</button><button class="btn sm ghost" id="chat-no" ${chat.busy ? 'disabled' : ''}>Zrušit</button></div></div>` : ''}
+      ${chat.busy ? '<div class="msg bot typing"><span></span><span></span><span></span></div>' : ''}
+    </div>
+    <form class="chat-form" id="chat-form"><textarea id="chat-in" rows="1" placeholder="${chat.pending ? 'Nejdřív potvrď nebo zruš akci výše' : 'Napiš, co mám udělat…'}" ${chat.busy || chat.pending ? 'disabled' : ''}></textarea><button class="btn primary" ${chat.busy || chat.pending ? 'disabled' : ''}>↑</button></form>
+  </div>`;
+  const log = $('#chat-log'); log.scrollTop = log.scrollHeight;
+  $('#chat-close').onclick = () => { chat.open = false; chatRender(); };
+  $('#chat-new').onclick = () => { if (chat.busy) return; Object.assign(chat, { contents: [], log: [], pending: null }); chatSave(); chatRender(); $('#chat-in')?.focus(); };
+  root.querySelectorAll('[data-chatq]').forEach(b => b.onclick = () => { const q = b.dataset.chatq; if (q.endsWith('…')) { $('#chat-in').value = q.replace('…', ' '); $('#chat-in').focus(); } else chatSend({ message: q }); });
+  root.querySelectorAll('[data-chatcopy]').forEach(b => b.onclick = () => copyText(chat.log[+b.dataset.chatcopy].text));
+  const inp = $('#chat-in');
+  const grow = () => { inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, 140) + 'px'; };
+  inp.oninput = grow;
+  inp.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('#chat-form').requestSubmit(); } };
+  $('#chat-form').onsubmit = e => { e.preventDefault(); const t = inp.value.trim(); if (t) chatSend({ message: t }); };
+  if ($('#chat-ok')) { $('#chat-ok').onclick = () => chatSend({ decision: 'approve' }); $('#chat-no').onclick = () => chatSend({ decision: 'reject' }); }
+}
+async function chatSend(payload) {
+  if (chat.busy) return;
+  if (payload.message) chat.log.push({ role: 'user', text: payload.message });
+  if (payload.decision) chat.log.push({ role: 'act', text: (payload.decision === 'approve' ? '✓ Provést: ' : '✕ Zrušeno: ') + chat.pending.map(p => p.summary).join('; ') });
+  const prevPending = chat.pending;
+  chat.pending = null; chat.busy = true; chatRender();
+  try {
+    const { data: { session: s } } = await sb.auth.getSession();
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/assistant`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (s?.access_token || '') },
+      body: JSON.stringify({ contents: chat.contents, ...payload }) });
+    const j = await r.json().catch(() => ({ error: 'Neplatná odpověď serveru (HTTP ' + r.status + ')' }));
+    if (j.error) throw new Error(j.error);
+    chat.contents = j.contents || chat.contents;
+    if (j.reply) chat.log.push({ role: 'bot', text: j.reply });
+    chat.pending = j.pending || null;
+    if (j.changed) { await loadState().catch(() => {}); if (!$('#modal-root').innerHTML) render(); }
+  } catch (e) {
+    chat.log.push({ role: 'err', text: e.message });
+    if (payload.decision) chat.pending = prevPending; // schválení se nepovedlo → nech ho k dispozici znovu
+  } finally { chat.busy = false; chatSave(); chatRender(); if (!chat.pending) $('#chat-in')?.focus(); }
+}
+
 // ---------- start ----------
 let session = null;
 window.addEventListener('hashchange', () => { if (!session) return; closeModal(); render(); window.scrollTo(0, 0); });
 async function load() { try { await loadState(); } catch (e) { toast('Chyba: ' + e.message); } render(); }
 sb.auth.onAuthStateChange((_ev, s) => {
   const was = session; session = s;
-  if (!s) { S = null; return renderLogin(); }
-  renderUser(s);
+  if (!s) { S = null; try { sessionStorage.removeItem('sj-chat'); } catch {} Object.assign(chat, { open: false, contents: [], log: [], pending: null }); chatRender(); return renderLogin(); }
+  renderUser(s); if (!was) chatRender();
   if (!was) setTimeout(() => { render(); load(); }, 0);
 });
 // obnova dat každou minutu (ne když zrovna něco vyplňuješ)
