@@ -125,7 +125,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 24px 20px 60px; }
 
 label.field { display: block; }
 label.field > span { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .6px; }
-input[type=text], input[type=email], input[type=password], input[type=number], input[type=url], input[type=search], select, textarea {
+input[type=text], input[type=email], input[type=password], input[type=number], input[type=url], input[type=search], input[type=tel], input[type=date], select, textarea {
   width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); color: var(--text); outline: none;
 }
 input:focus, select:focus, textarea:focus { border-color: var(--focus); }
@@ -322,3 +322,6 @@ table.stock tr.low td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
   .s-tools input[type=search], .s-tools select { max-width: none; flex: 1 1 100%; }
   .sm-head, .sm-row { grid-template-columns: 1fr 84px 32px; }
 }
+
+.ship-ref { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8em; padding: 2px 8px; border-radius: 7px; background: var(--chip); border: 1px solid var(--line-2); margin-right: 4px; }
+label.chip { display: inline-flex; align-items: center; user-select: none; }
