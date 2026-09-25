@@ -166,7 +166,7 @@ tr.done td { opacity: .45; }
 .notice.warn { border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 7%, var(--panel)); }
 
 /* ---------- modal ---------- */
-.modal-back { position: fixed; inset: 0; background: var(--backdrop); z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; }
+.modal-back { position: fixed; inset: 0; background: var(--backdrop); z-index: 70; display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; }
 .modal { width: 100%; max-width: 720px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 18px; padding: 22px; box-shadow: 0 30px 80px var(--shadow); }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; gap: 10px; }
 .modal-head h2 { margin: 0; font-size: 20px; letter-spacing: -.4px; }
@@ -359,3 +359,8 @@ label.chip { display: inline-flex; align-items: center; user-select: none; }
   .chat-panel { inset: 0; width: auto; height: auto; border-radius: 0; border: 0; }
   .chat-form textarea { font-size: 16px; }
 }
+
+.imp-drop { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 28px; border: 2px dashed var(--line-2); border-radius: 12px; cursor: pointer; text-align: center; }
+.imp-drop:hover, .imp-drop.over { border-color: var(--hover-border); background: var(--hover); }
+.imp-qty { gap: 8px; margin-bottom: 6px; flex-wrap: nowrap; }
+.imp-qty select { flex: 1; min-width: 0; }

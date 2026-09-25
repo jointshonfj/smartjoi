@@ -384,7 +384,7 @@ function renderStockApp(tab) {
 }
 function stockOverview() {
   const whs = activeWhs(), c = stockCounts();
-  if (!whs.length) return `<div class="card empty"><div class="big">🏬</div><b>Nejdřív si založ sklad.</b><div class="small">Třeba „Hlavní sklad“, „Prodejna“, „Externí sklad“… Skladů můžeš mít kolik chceš.</div><div style="margin-top:14px"><button class="btn primary" data-editwh="">＋ Nový sklad</button></div></div>`;
+  if (!whs.length) return `<div class="card empty"><div class="big">🏬</div><b>Nejdřív si založ sklad.</b><div class="small">Třeba „Hlavní sklad“, „Prodejna“, „Externí sklad“… Skladů můžeš mít kolik chceš.</div><div style="margin-top:14px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap"><button class="btn primary" data-editwh="">＋ Nový sklad</button><button class="btn" data-simport>⬆ Import z Excelu</button></div></div>`;
   const words = fold(ui.stockSearch).split(/\s+/).filter(Boolean);
   const wf = ui.stockWh && stWh(ui.stockWh) ? ui.stockWh : '';
   const qOf = it => wf ? lvl(it.id, wf) : lvlTotal(it.id);
@@ -408,9 +408,9 @@ function stockOverview() {
       <select id="s-wh"><option value="">Všechny sklady</option>${whs.map(w => `<option value="${w.id}" ${wf === w.id ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>
       <select id="s-cat"><option value="">Všechny kategorie</option>${S.stock.categories.map(k => `<option value="${k.id}" ${ui.stockCat === k.id ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}<option value="__none" ${ui.stockCat === '__none' ? 'selected' : ''}>Bez kategorie</option></select>
       <div class="chips"><button class="chip ${!ui.stockOnly ? 'on' : ''}" data-sonly="">Vše</button><button class="chip ${ui.stockOnly === 'in' ? 'on' : ''}" data-sonly="in">Skladem</button><button class="chip ${ui.stockOnly === 'low' ? 'on' : ''}" data-sonly="low">Pod minimem</button></div>
-      <span class="grow"></span><button class="btn sm primary" data-edititem="">＋ Nová položka</button>
+      <span class="grow"></span><button class="btn sm ghost" data-simport>⬆ Import</button><button class="btn sm ghost" data-sexport ${S.stock.items.some(i => !i.archived) ? '' : 'disabled'}>⬇ Export</button><button class="btn sm primary" data-edititem="">＋ Nová položka</button>
     </div>
-    ${!S.stock.items.filter(i => !i.archived).length ? `<div class="card empty"><div class="big">📦</div><b>Zatím žádné skladové položky.</b><div class="small">Založ je tlačítkem „＋ Nová položka“, nebo rovnou přes „↓ Naskladnit“ — nové položky se při naskladnění založí samy.</div></div>`
+    ${!S.stock.items.filter(i => !i.archived).length ? `<div class="card empty"><div class="big">📦</div><b>Zatím žádné skladové položky.</b><div class="small">Založ je tlačítkem „＋ Nová položka“, nahraj z Excelu přes „⬆ Import“, nebo rovnou přes „↓ Naskladnit“ — nové položky se při naskladnění založí samy.</div></div>`
     : !list.length ? `<div class="card empty">Nic nenalezeno.</div>`
     : `<div class="card" style="padding:4px 0"><div class="table-wrap"><table class="stock">
       <thead><tr><th>Položka</th><th class="hide-m">Kategorie</th>${cols ? whs.map(w => `<th class="num hide-m">${esc(w.name)}</th>`).join('') : ''}<th class="num">${wf ? esc(stWh(wf).name) : 'Celkem'}</th></tr></thead>
@@ -466,6 +466,8 @@ function bindStock() {
   V.querySelectorAll('[data-stab]').forEach(b => b.onclick = () => { location.hash = '#/sklad/' + b.dataset.stab; });
   V.querySelectorAll('[data-smove]').forEach(b => b.onclick = () => stockMoveModal(b.dataset.smove));
   V.querySelectorAll('[data-edititem]').forEach(b => b.onclick = () => editStockItem(b.dataset.edititem));
+  V.querySelectorAll('[data-simport]').forEach(b => b.onclick = importStockModal);
+  V.querySelectorAll('[data-sexport]').forEach(b => b.onclick = exportStockXlsx);
   V.querySelectorAll('[data-editwh]').forEach(b => b.onclick = () => editWarehouse(b.dataset.editwh));
   V.querySelectorAll('[data-editcat]').forEach(b => b.onclick = () => editCategory(b.dataset.editcat));
   V.querySelectorAll('[data-whfilter]').forEach(b => b.onclick = () => { ui.stockWh = b.dataset.whfilter; location.hash = '#/sklad/prehled'; });
@@ -639,6 +641,178 @@ function inventoryModal(id) {
     closeModal();
     if (!rows.length) return toast('Beze změny');
     await act(async () => ok(await sb.from('stock_moves').insert(rows)), 'Inventura uložena ✓');
+  };
+}
+
+// --- import / export z Excelu (SheetJS se načte až při použití)
+const XLSX_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/xlsx.mjs';
+let _xlsx = null;
+async function xlsxLib() { if (!_xlsx) _xlsx = await import(XLSX_URL); return _xlsx; }
+const IMPORT_FIELDS = [
+  ['sku', 'Kód', [/^k[oó]d/i, /^sku$/i, /^code$/i, /^č[ií]slo/i, /^product.?code/i, /^katalog/i]],
+  ['name', 'Název', [/^n[aá]zev/i, /^name$/i, /^produkt/i, /^polo[zž]ka/i, /^popis/i, /^description/i]],
+  ['category', 'Kategorie', [/^kategorie/i, /^category/i, /^skupina/i]],
+  ['unit', 'Jednotka', [/^jednotka/i, /^unit/i, /^mj$/i, /^m\.?j\.?$/i]],
+  ['mpn', 'MPN', [/^mpn$/i, /v[yý]robce/i, /part.?n/i]],
+  ['ean', 'EAN', [/^ean/i, /^[čc][aá]rov/i, /barcode/i]],
+  ['min', 'Minimum', [/^min/i]],
+];
+const QTY_RE = [/^mno[zž]stv/i, /^pcs$/i, /^ks$/i, /^kus/i, /skladem/i, /^stav/i, /^qty/i, /^quantity/i, /^po[cč]et/i, /^stock/i];
+const numCell = v => { if (typeof v === 'number') return v; const t = String(v ?? '').replace(/\s| /g, '').replace(',', '.'); if (t === '') return null; const n = Number(t); return Number.isFinite(n) ? n : NaN; };
+async function exportStockXlsx() {
+  try {
+    const X = await xlsxLib();
+    const whs = activeWhs(), wf = ui.stockWh && stWh(ui.stockWh) ? ui.stockWh : '';
+    const words = fold(ui.stockSearch).split(/\s+/).filter(Boolean);
+    const items = S.stock.items.filter(i => !i.archived)
+      .filter(i => !ui.stockCat || (ui.stockCat === '__none' ? !i.categoryId : i.categoryId === ui.stockCat))
+      .filter(i => !words.length || words.every(w => fold([i.sku, i.name, i.mpn, i.ean, stCat(i.categoryId)?.name, i.note].join(' ')).includes(w)))
+      .sort((a, b) => a.name.localeCompare(b.name, 'cs'));
+    const cols = wf ? [stWh(wf)] : whs;
+    const rows = items.map(i => {
+      const r = { 'Kód': i.sku, 'Název': i.name, 'Kategorie': stCat(i.categoryId)?.name || '', 'Jednotka': i.unit, 'MPN': i.mpn, 'EAN': i.ean, 'Minimum': i.minQty ?? '' };
+      for (const w of cols) r[w.name] = lvl(i.id, w.id);
+      if (!wf) r['Celkem'] = lvlTotal(i.id);
+      return r;
+    });
+    const ws = X.utils.json_to_sheet(rows, { header: ['Kód', 'Název', 'Kategorie', 'Jednotka', 'MPN', 'EAN', 'Minimum', ...cols.map(w => w.name), ...(wf ? [] : ['Celkem'])] });
+    ws['!cols'] = [{ wch: 16 }, { wch: 44 }, { wch: 18 }, { wch: 9 }, { wch: 16 }, { wch: 15 }, { wch: 9 }, ...cols.map(() => ({ wch: 14 })), { wch: 10 }];
+    const wb = X.utils.book_new(); X.utils.book_append_sheet(wb, ws, 'Sklad');
+    X.writeFile(wb, `StockJoi-${wf ? stWh(wf).name.replace(/[^\w\-]+/g, '_') + '-' : ''}${todayIso()}.xlsx`);
+    toast(`Exportováno ${plural(rows.length, 'položka', 'položky', 'položek')} ✓`);
+  } catch (e) { toast('Export se nepovedl: ' + e.message); }
+}
+function importStockModal() {
+  const imp = { file: '', headers: [], rows: [], map: {}, qty: [], mode: 'set' };
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:760px">
+    <div class="modal-head"><h2>⬆ Import z Excelu</h2><button class="icon-btn" data-close>✕</button></div>
+    <div id="imp-body" class="stack">
+      <p class="small muted" style="margin:0">Nahraj .xlsx, .xls nebo .csv. První řádek musí být hlavička (např. <b>Kód · Název · Kategorie · Množství</b>). Stačí i jen dva sloupce: kód a počet kusů. Soubor z exportu StockJoi jde nahrát zpátky beze změn.</p>
+      <label class="imp-drop"><input type="file" id="imp-file" accept=".xlsx,.xls,.csv,.ods" hidden><b>Vybrat soubor</b><span class="small muted">nebo ho sem přetáhni</span></label>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="imp-go" disabled>Importovat</button></div>
+  </div></div>`;
+  $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = closeModal);
+  const drop = $('.imp-drop');
+  drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]); };
+  $('#imp-file').onchange = () => { if ($('#imp-file').files[0]) readFile($('#imp-file').files[0]); };
+  async function readFile(f) {
+    try {
+      const X = await xlsxLib();
+      const wb = X.read(await f.arrayBuffer(), { type: 'array', raw: /\.csv$/i.test(f.name) }); // CSV jako text → „7,5“ zůstane 7,5
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const aoa = X.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true, blankrows: true });
+      const hi = aoa.findIndex(r => r.filter(c => String(c).trim() !== '').length >= 2);
+      if (hi < 0) throw new Error('V souboru nevidím tabulku s hlavičkou');
+      imp.file = f.name; imp.headers = aoa[hi].map((h, i) => String(h).trim() || `Sloupec ${i + 1}`);
+      imp.first = hi + 2; imp.rows = aoa.slice(hi + 1).map((r, i) => Object.assign(r, { _n: hi + 2 + i })).filter(r => r.some(c => String(c).trim() !== ''));
+      // automatické rozpoznání sloupců
+      const used = new Set();
+      for (const [k, , res] of IMPORT_FIELDS) { const i = imp.headers.findIndex((h, j) => !used.has(j) && res.some(re => re.test(h))); imp.map[k] = i; if (i >= 0) used.add(i); }
+      imp.qty = [];
+      imp.headers.forEach((h, j) => { if (used.has(j)) return; const w = S.stock.warehouses.find(x => fold(x.name) === fold(h)); if (w) { imp.qty.push({ col: j, wh: w.id }); used.add(j); } });
+      if (!imp.qty.length) { const j = imp.headers.findIndex((h, j) => !used.has(j) && QTY_RE.some(re => re.test(h))); if (j >= 0) imp.qty.push({ col: j, wh: (ui.stockWh && stWh(ui.stockWh) ? ui.stockWh : activeWhs()[0]?.id) || '__new:Hlavní sklad' }); }
+      renderMapping();
+    } catch (e) { toast('Soubor se nepodařilo přečíst: ' + e.message); }
+  }
+  function plan() {
+    const col = k => imp.map[k] ?? -1, cell = (r, k) => col(k) >= 0 ? String(r[col(k)] ?? '').trim() : '';
+    const bySku = new Map(S.stock.items.filter(i => i.sku).map(i => [fold(i.sku), i])), byName = new Map(S.stock.items.map(i => [fold(i.name), i]));
+    const out = [], errs = []; const seen = new Set();
+    imp.rows.forEach((r, n) => {
+      const sku = cell(r, 'sku'), name = cell(r, 'name');
+      if (!sku && !name) return;
+      const key = fold(sku || name); if (seen.has(key)) { errs.push(`Řádek ${r._n}: ${sku || name} je v souboru dvakrát — použije se první`); return; } seen.add(key);
+      const ex = (sku && bySku.get(fold(sku))) || (!sku && byName.get(fold(name))) || null;
+      if (!ex && !name && !sku) return;
+      const min = cell(r, 'min') === '' ? undefined : numCell(cell(r, 'min'));
+      const qty = imp.qty.filter(q => q.col >= 0 && q.wh).map(q => ({ wh: q.wh, v: numCell(r[q.col]) })).filter(q => q.v !== null);
+      if (qty.some(q => Number.isNaN(q.v))) { errs.push(`Řádek ${r._n} (${sku || name}): množství není číslo — přeskočeno`); return; }
+      out.push({ ex, sku, name: name || ex?.name || sku, category: cell(r, 'category'), unit: cell(r, 'unit'), mpn: cell(r, 'mpn'), ean: cell(r, 'ean'), min: Number.isNaN(min) ? undefined : min, qty });
+    });
+    return { out, errs };
+  }
+  function renderMapping() {
+    const opt = cur => `<option value="-1">— nepoužít —</option>` + imp.headers.map((h, i) => `<option value="${i}" ${i === cur ? 'selected' : ''}>${esc(h)}</option>`).join('');
+    const whOpt = (cur, col) => S.stock.warehouses.filter(w => !w.archived).map(w => `<option value="${w.id}" ${cur === w.id ? 'selected' : ''}>${esc(w.name)}</option>`).join('')
+      + `<option value="__new:${esc(imp.headers[col] && !QTY_RE.some(re => re.test(imp.headers[col])) ? imp.headers[col] : 'Hlavní sklad')}" ${String(cur).startsWith('__new:') ? 'selected' : ''}>＋ Založit sklad „${esc(String(cur).startsWith('__new:') ? cur.slice(6) : (imp.headers[col] && !QTY_RE.some(re => re.test(imp.headers[col])) ? imp.headers[col] : 'Hlavní sklad'))}“</option>`;
+    const p = plan();
+    const nNew = p.out.filter(x => !x.ex).length, nUpd = p.out.length - nNew;
+    const whId = w => String(w).startsWith('__new:') ? null : w;
+    const nQty = p.out.reduce((t, x) => t + x.qty.filter(q => imp.mode === 'add' ? q.v !== 0 : q.v !== (x.ex && whId(q.wh) ? lvl(x.ex.id, q.wh) : 0)).length, 0);
+    $('#imp-body').innerHTML = `
+      <div class="small"><b>${esc(imp.file)}</b> · ${plural(imp.rows.length, 'řádek', 'řádky', 'řádků')} <button class="btn sm ghost" id="imp-again" style="margin-left:8px">Jiný soubor</button></div>
+      <div><h3 style="margin:4px 0 8px">Sloupce</h3><div class="grid-3">${IMPORT_FIELDS.map(([k, l]) => `<label class="field"><span>${l}${k === 'sku' || k === 'name' ? ' *' : ''}</span><select data-impmap="${k}">${opt(imp.map[k])}</select></label>`).join('')}</div>
+        <div class="small muted" style="margin-top:4px">* Položky se párují podle kódu, bez kódu podle názvu. Nové se založí, existujícím se doplní vyplněné údaje.</div></div>
+      <div><h3 style="margin:4px 0 8px">Počet kusů skladem</h3>
+        ${imp.qty.map((q, i) => `<div class="row imp-qty"><select data-qcol="${i}">${opt(q.col)}</select><span class="muted">→ sklad</span><select data-qwh="${i}">${whOpt(q.wh, q.col)}</select><button class="icon-btn" data-qdel="${i}">✕</button></div>`).join('') || '<div class="small muted">Bez množství — naimportují se jen položky.</div>'}
+        <button class="btn sm ghost" id="imp-qadd" style="margin-top:6px">＋ Sloupec s množstvím</button>
+        ${imp.qty.length ? `<div class="chips" style="margin-top:10px"><label class="chip ${imp.mode === 'set' ? 'on' : ''}"><input type="radio" name="imp-mode" value="set" ${imp.mode === 'set' ? 'checked' : ''} hidden>Nastavit stav (inventura)</label><label class="chip ${imp.mode === 'add' ? 'on' : ''}"><input type="radio" name="imp-mode" value="add" ${imp.mode === 'add' ? 'checked' : ''} hidden>Přičíst (naskladnění)</label></div>
+          <div class="small muted" style="margin-top:4px">${imp.mode === 'set' ? 'Stav ve skladu bude přesně jako v souboru; rozdíl se zapíše jako inventura.' : 'Množství ze souboru se přičte k současnému stavu jako naskladnění.'}</div>` : ''}
+      </div>
+      <div class="notice ${p.errs.length ? 'warn' : ''}"><b>Náhled:</b> ${plural(nNew, 'nová položka', 'nové položky', 'nových položek')} · ${plural(nUpd, 'existující', 'existující', 'existujících')} · ${imp.qty.length ? plural(nQty, 'změna stavu', 'změny stavu', 'změn stavu') : 'bez změny stavu'}
+        ${p.errs.length ? `<div class="small" style="margin-top:6px">${p.errs.slice(0, 5).map(esc).join('<br>')}${p.errs.length > 5 ? `<br>… a ${p.errs.length - 5} dalších` : ''}</div>` : ''}</div>
+      <div class="table-wrap"><table><thead><tr><th></th><th>Kód</th><th>Název</th><th class="hide-m">Kategorie</th>${imp.qty.map(q => `<th class="num">${esc(String(q.wh).startsWith('__new:') ? q.wh.slice(6) : stWh(q.wh)?.name || '?')}</th>`).join('')}</tr></thead><tbody>
+        ${p.out.slice(0, 12).map(x => `<tr><td><span class="badge ${x.ex ? '' : 'ok'}">${x.ex ? 'úprava' : 'nová'}</span></td><td><code>${esc(x.sku)}</code></td><td>${esc(x.name)}</td><td class="hide-m small">${esc(x.category)}</td>${imp.qty.map(q => { const v = x.qty.find(z => z.wh === q.wh); return `<td class="num">${v ? fmtQty(v.v) : '<span class="muted">—</span>'}</td>`; }).join('')}</tr>`).join('')}
+      </tbody></table></div>${p.out.length > 12 ? `<div class="small muted">… a dalších ${p.out.length - 12}</div>` : ''}`;
+    $('#imp-go').disabled = !p.out.length || (imp.map.sku < 0 && imp.map.name < 0);
+    $('#imp-again').onclick = () => $('#imp-file') ? $('#imp-file').click() : importStockModal();
+    document.querySelectorAll('[data-impmap]').forEach(s => s.onchange = () => { imp.map[s.dataset.impmap] = +s.value; renderMapping(); });
+    document.querySelectorAll('[data-qcol]').forEach(s => s.onchange = () => { imp.qty[+s.dataset.qcol].col = +s.value; renderMapping(); });
+    document.querySelectorAll('[data-qwh]').forEach(s => s.onchange = () => { imp.qty[+s.dataset.qwh].wh = s.value; renderMapping(); });
+    document.querySelectorAll('[data-qdel]').forEach(b => b.onclick = () => { imp.qty.splice(+b.dataset.qdel, 1); renderMapping(); });
+    document.querySelectorAll('input[name="imp-mode"]').forEach(r => r.onchange = () => { imp.mode = r.value; renderMapping(); });
+    $('#imp-qadd').onclick = () => { imp.qty.push({ col: -1, wh: activeWhs()[0]?.id || '__new:Hlavní sklad' }); renderMapping(); };
+  }
+  $('#imp-go').onclick = async () => {
+    const p = plan(); if (!p.out.length) return;
+    if (imp.qty.some(q => q.col < 0)) return toast('U množství vyber sloupec, nebo řádek odeber ✕');
+    const whs = [...new Set(imp.qty.map(q => q.wh))];
+    if (new Set(imp.qty.map(q => q.wh)).size !== imp.qty.length) return toast('Každý sklad může mít jen jeden sloupec s množstvím');
+    const nNew = p.out.filter(x => !x.ex).length;
+    if (!confirm(`Importovat ${plural(p.out.length, 'položku', 'položky', 'položek')} (${nNew} nových)?${imp.qty.length ? `\nStav skladu: ${imp.mode === 'set' ? 'nastavit podle souboru' : 'přičíst'}.` : ''}`)) return;
+    $('#imp-go').disabled = true; $('#imp-go').textContent = 'Importuji…';
+    const res = await act(async () => {
+      const now = new Date().toISOString();
+      // sklady a kategorie
+      const whMap = {};
+      for (const w of whs) whMap[w] = w.startsWith('__new:') ? ok(await sb.from('stock_warehouses').insert({ name: w.slice(6), sort: S.stock.warehouses.length }).select().single()).id : w;
+      const catMap = new Map(S.stock.categories.map(k => [fold(k.name), k.id]));
+      for (const name of [...new Set(p.out.map(x => x.category).filter(Boolean))]) if (!catMap.has(fold(name))) catMap.set(fold(name), ok(await sb.from('stock_categories').insert({ name }).select().single()).id);
+      const catId = x => x.category ? catMap.get(fold(x.category)) : undefined;
+      // nové položky najednou
+      const fresh = p.out.filter(x => !x.ex);
+      for (let i = 0; i < fresh.length; i += 500) {
+        const chunk = fresh.slice(i, i + 500);
+        const ins = ok(await sb.from('stock_items').insert(chunk.map(x => ({ sku: x.sku, name: x.name, category_id: catId(x) || null, unit: x.unit || 'ks', mpn: x.mpn, ean: x.ean, min_qty: x.min ?? null }))).select('id,sku,name'));
+        chunk.forEach((x, j) => { x.id = ins[j].id; });
+      }
+      // existující: doplnit vyplněné údaje
+      const upd = p.out.filter(x => x.ex);
+      for (let i = 0; i < upd.length; i += 20) await Promise.all(upd.slice(i, i + 20).map(async x => {
+        x.id = x.ex.id; const row = {};
+        if (x.name && x.name !== x.ex.name) row.name = x.name;
+        if (catId(x) && catId(x) !== x.ex.categoryId) row.category_id = catId(x);
+        for (const [k, f] of [['unit', 'unit'], ['mpn', 'mpn'], ['ean', 'ean']]) if (x[k] && x[k] !== x.ex[f]) row[k] = x[k];
+        if (x.min !== undefined && x.min !== x.ex.minQty) row.min_qty = x.min;
+        if (x.ex.archived) row.archived = false;
+        if (Object.keys(row).length) ok(await sb.from('stock_items').update({ ...row, updated_at: now }).eq('id', x.id));
+      }));
+      // stav skladu
+      const doc = crypto.randomUUID(), moves = [];
+      for (const x of p.out) for (const q of x.qty) {
+        const wh = whMap[q.wh], cur = x.ex ? lvl(x.id, wh) : 0;
+        const d = imp.mode === 'set' ? Math.round((q.v - cur) * 1000) / 1000 : q.v;
+        if (d) moves.push({ doc_id: doc, kind: imp.mode === 'set' ? 'adjust' : 'in', item_id: x.id, warehouse_id: wh, qty: d, reference: imp.file, note: 'Import z Excelu' });
+      }
+      for (let i = 0; i < moves.length; i += 500) ok(await sb.from('stock_moves').insert(moves.slice(i, i + 500)));
+      return { items: p.out.length, fresh: fresh.length, moves: moves.length };
+    });
+    if (!res) { $('#imp-go').disabled = false; $('#imp-go').textContent = 'Importovat'; return; }
+    closeModal();
+    { toast(`Hotovo: ${plural(res.items, 'položka', 'položky', 'položek')} (${res.fresh} nových), ${plural(res.moves, 'změna stavu', 'změny stavu', 'změn stavu')} ✓`); }
   };
 }
 
