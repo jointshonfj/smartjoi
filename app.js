@@ -5,7 +5,7 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
 let busy = false;
-const ui = { emailSearch: '', emailCat: '', emailVals: {}, search: '', orderFilter: 'active', aufFilter: 'sent', docs: {}, includeRefs: false, showPast: false };
+const ui = { stockSearch: '', stockWh: '', stockCat: '', stockOnly: '', stockMoveSearch: '', stockMoveKind: '', orderSearch: '', emailSearch: '', emailCat: '', emailVals: {}, search: '', orderFilter: 'active', aufFilter: 'sent', docs: {}, includeRefs: false, showPast: false };
 
 const COUNTRIES = [
   ['DE', 'Německo'], ['AT', 'Rakousko'], ['PL', 'Polsko'], ['SK', 'Slovensko'], ['IT', 'Itálie'], ['NL', 'Nizozemsko'],
@@ -41,6 +41,8 @@ const fmtQtyEn = n => String(Math.round(n * 1000) / 1000);
 const eur = n => n == null || n === '' || isNaN(n) ? '—' : Number(n).toLocaleString('cs-CZ', { style: 'currency', currency: 'EUR' });
 const parseEur = s => { const t = String(s ?? '').replace(/\s|€|eur/gi, '').replace(/\.(?=\d{3}(\D|$))/g, '').replace(',', '.'); const n = parseFloat(t); return Number.isFinite(n) ? Math.round(n * 100) / 100 : null; };
 const todayIso = () => new Date().toISOString().slice(0, 10);
+// hledání bez ohledu na velikost písmen a diakritiku
+const fold = s => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 const plural = (n, a, b, c) => `${n} ${n === 1 ? a : n > 1 && n < 5 ? b : c}`;
 function fmtDate(iso, withTime = true) {
   if (!iso) return '—';
@@ -87,7 +89,7 @@ async function fetchAll(table, build = q => q) {
 }
 async function loadState() {
   const since = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  const [st, sups, prods, orders, items, aufs, ships, events, emails] = await Promise.all([
+  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock] = await Promise.all([
     sb.from('settings').select('*').eq('id', 1).single().then(ok),
     fetchAll('suppliers', q => q.order('name')),
     fetchAll('products', q => q.order('code')),
@@ -97,6 +99,7 @@ async function loadState() {
     fetchAll('shipments', q => q.order('ship_date')),
     sb.from('calendar_events').select('*').gte('starts_on', since).order('starts_on').limit(200).then(ok),
     fetchAll('email_templates', q => q.order('title')),
+    loadStock(),
   ]);
   const products = {};
   for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name, nameEn: p.name_en || '', nameEnSrc: p.name_en_src || '', mpn: p.mpn || '', shoptetSupplier: p.shoptet_supplier || '' };
@@ -109,6 +112,7 @@ async function loadState() {
     aufs: aufs.map(a => ({ id: a.id, orderCode: a.order_code, supplierId: a.supplier_id || '', status: a.status, to: a.email_to, subject: a.subject, body: a.body, lines: a.lines || [], sentAt: a.sent_at, aufNumber: a.auf_number || '', amount: a.amount_eur == null ? null : Number(a.amount_eur), confirmedAt: a.confirmed_at, note: a.note || '', shipmentId: a.shipment_id || '', createdAt: a.created_at })),
     shipments: ships.map(s => ({ id: s.id, date: s.ship_date || '', note: s.note || '' })),
     events,
+    stock,
     emails: emails.map(e => ({ id: e.id, title: e.title, category: e.category || '', to: e.to_addr || '', cc: e.cc || '', subject: e.subject || '', body: e.body || '', note: e.note || '', pinned: !!e.pinned, useCount: e.use_count || 0, lastUsed: e.last_used_at, updatedAt: e.updated_at })),
     sync: { fetchedAt: st.last_sync_at, error: st.last_sync_error, errorAt: st.last_sync_error_at, headers: st.sync_headers || [], rowCount: st.sync_row_count, sample: st.sync_sample || [], statuses: st.sync_statuses || {} },
   };
@@ -192,6 +196,11 @@ function render() {
     crumb.innerHTML = `<span>/</span><a href="#/emaily">EmailJoi</a>${e ? `<span>/</span><b>${esc(e.title)}</b>` : ''}`;
     return r.tab === 'e' ? renderEmailDetail(r.id) : renderEmailList();
   }
+  if (r.app === 'sklad') {
+    const it = r.tab === 'p' ? stItem(r.id) : null;
+    crumb.innerHTML = `<span>/</span><a href="#/sklad">StockJoi</a>${it ? `<span>/</span><b>${esc(it.name)}</b>` : ''}`;
+    return r.tab === 'p' ? renderStockItem(r.id) : renderStockApp(r.tab || 'prehled');
+  }
   if (r.app !== 'objednavky') { crumb.innerHTML = ''; return renderHub(); }
   crumb.innerHTML = `<span>/</span><a href="#/objednavky">OrderJoi</a>${r.tab === 'o' ? `<span>/</span><b>${esc(r.id)}</b>` : ''}`;
   if (r.tab === 'o') return renderOrderDetail(r.id);
@@ -212,7 +221,7 @@ function renderHub() {
       <a class="app-card" href="#/objednavky">
         <div class="row"><div class="app-icon">📦</div><span class="num grow" style="text-align:right">01</span></div>
         <h3>OrderJoi</h3>
-        <p>Objednávky od dodavatelů: Shoptet → e-mail dodavateli → AUF → svoz.</p>
+        <p>Vinylor · objednávky od dodavatelů: Shoptet → e-mail dodavateli → AUF → svoz.</p>
         <div class="badge-row">
           ${c.todo ? `<span class="badge warn"><span class="dot"></span>${c.todo} potřeba objednat</span>` : ''}
           ${c.sentAufs ? `<span class="badge info">${c.sentAufs} čeká na AUF</span>` : ''}
@@ -226,6 +235,12 @@ function renderHub() {
         <p>Často posílané e-maily — adresa, předmět a text připravené ke zkopírování.</p>
         <div class="badge-row"><span class="badge">${plural(S.emails.length, 'šablona', 'šablony', 'šablon')}</span>${S.emails.some(e => e.pinned) ? `<span class="badge info">★ ${S.emails.filter(e => e.pinned).length} připnuté</span>` : ''}</div>
       </a>
+      <a class="app-card" href="#/sklad">
+        <div class="row"><div class="app-icon">🏬</div><span class="num grow" style="text-align:right">03</span></div>
+        <h3>StockJoi</h3>
+        <p>Sklad: stav zboží ve více skladech, naskladnění, vyskladnění a přesuny.</p>
+        <div class="badge-row">${(() => { const sc = stockCounts(); return `<span class="badge">${plural(sc.items, 'položka', 'položky', 'položek')} · ${plural(activeWhs().length, 'sklad', 'sklady', 'skladů')}</span>${sc.low ? `<span class="badge bad"><span class="dot"></span>${sc.low} pod minimem</span>` : ''}`; })()}</div>
+      </a>
       <a class="app-card" href="#/kalendar">
         <div class="row"><div class="app-icon">📅</div><span class="num grow" style="text-align:right">SmartJoi</span></div>
         <h3>Kalendář</h3>
@@ -235,7 +250,7 @@ function renderHub() {
       <div class="app-card soon">
         <div class="row"><div class="app-icon">＋</div></div>
         <h3>Další aplikace</h3>
-        <p>Místo pro další nástroj — reporty, sklad, reklamace…</p>
+        <p>Místo pro další nástroj — reporty, reklamace…</p>
       </div>
     </div>
     <div class="footer">SmartJoi · Jointshon | FJ</div>`;
@@ -286,6 +301,420 @@ function renderCalendar() {
     const tok = [...crypto.getRandomValues(new Uint8Array(18))].map(b => b.toString(16).padStart(2, '0')).join('');
     await act(async () => ok(await sb.from('settings').update({ calendar_token: tok }).eq('id', 1)), 'Nový odkaz vytvořen ✓');
   };
+}
+
+// ---------- APLIKACE 03: STOCKJOI (sklad) ----------
+const STOCK_TABS = [['prehled', 'Přehled'], ['pohyby', 'Pohyby'], ['sklady', 'Sklady'], ['kategorie', 'Kategorie']];
+const MOVE_KIND = { in: ['Naskladnění', 'ok', '↓'], out: ['Vyskladnění', 'warn', '↑'], transfer: ['Přesun', 'info', '⇄'], adjust: ['Inventura', '', '≡'] };
+const stItem = id => S.stock.items.find(i => i.id === id);
+const stWh = id => S.stock.warehouses.find(w => w.id === id);
+const stCat = id => S.stock.categories.find(c => c.id === id);
+const activeWhs = () => S.stock.warehouses.filter(w => !w.archived);
+const lvl = (itemId, whId) => S.stock.levels[itemId + '|' + whId] || 0;
+const lvlTotal = itemId => activeWhs().reduce((s, w) => s + lvl(itemId, w.id), 0) + S.stock.warehouses.filter(w => w.archived).reduce((s, w) => s + lvl(itemId, w.id), 0);
+const isLow = it => it.minQty != null && lvlTotal(it.id) < it.minQty;
+const qtyU = (n, u) => `${fmtQty(n)} ${esc(u || '')}`.trim();
+const itemLabel = it => (it.sku ? it.sku + ' · ' : '') + it.name;
+const stockCounts = () => { const its = S.stock.items.filter(i => !i.archived); return { items: its.length, low: its.filter(isLow).length }; };
+
+async function loadStock() {
+  const [whs, cats, items, levels, moves] = await Promise.all([
+    fetchAll('stock_warehouses', q => q.order('sort').order('name')),
+    fetchAll('stock_categories', q => q.order('sort').order('name')),
+    fetchAll('stock_items', q => q.order('name')),
+    fetchAll('stock_levels'),
+    sb.from('stock_moves').select('*').order('created_at', { ascending: false }).limit(600).then(ok),
+  ]);
+  const lv = {}; for (const l of levels) lv[l.item_id + '|' + l.warehouse_id] = Number(l.qty);
+  return {
+    warehouses: whs.map(w => ({ id: w.id, name: w.name, location: w.location || '', note: w.note || '', archived: w.archived })),
+    categories: cats.map(c => ({ id: c.id, name: c.name })),
+    items: items.map(i => ({ id: i.id, sku: i.sku || '', name: i.name, categoryId: i.category_id || '', unit: i.unit || 'ks', mpn: i.mpn || '', ean: i.ean || '', minQty: i.min_qty == null ? null : Number(i.min_qty), note: i.note || '', archived: i.archived })),
+    levels: lv,
+    moves: moves.map(m => ({ id: m.id, doc: m.doc_id, kind: m.kind, itemId: m.item_id, whId: m.warehouse_id, qty: Number(m.qty), ref: m.reference || '', note: m.note || '', by: m.created_by || '', at: m.created_at })),
+  };
+}
+// pohyby seskupené do dokladů (přesun = 2 řádky)
+function groupDocs(moves) {
+  const map = new Map();
+  for (const m of moves) {
+    if (!map.has(m.doc)) map.set(m.doc, { id: m.doc, kind: m.kind, at: m.at, ref: m.ref, note: m.note, by: m.by, lines: [] });
+    map.get(m.doc).lines.push(m);
+  }
+  return [...map.values()].map(d => {
+    const whs = [...new Set(d.lines.map(l => l.whId))];
+    if (d.kind === 'transfer') { d.from = d.lines.find(l => l.qty < 0)?.whId; d.to = d.lines.find(l => l.qty > 0)?.whId; d.lines = d.lines.filter(l => l.qty > 0); }
+    d.whs = whs; return d;
+  });
+}
+function docWhText(d) {
+  if (d.kind === 'transfer') return `${esc(stWh(d.from)?.name || '?')} → ${esc(stWh(d.to)?.name || '?')}`;
+  return d.whs.map(id => esc(stWh(id)?.name || '?')).join(', ');
+}
+function renderDoc(d, { showItems = true } = {}) {
+  const k = MOVE_KIND[d.kind];
+  return `<div class="sdoc">
+    <div class="row" style="gap:8px;align-items:flex-start">
+      <span class="badge ${k[1]}">${k[2]} ${k[0]}</span>
+      <div class="grow"><b>${docWhText(d)}</b>${d.ref ? ` · <span>${esc(d.ref)}</span>` : ''}
+        <div class="sub">${fmtDate(d.at)}${d.by ? ' · ' + esc(d.by.split('@')[0]) : ''}${d.note ? ' · ' + esc(d.note) : ''}</div></div>
+      <button class="icon-btn" data-deldoc-s="${d.id}" title="Smazat pohyb (oprava chyby)">🗑</button>
+    </div>
+    ${showItems ? `<div class="sdoc-lines">${d.lines.map(l => { const it = stItem(l.itemId) || { name: '?' }; return `<a href="#/sklad/p/${l.itemId}">${esc(it.name)}${it.sku ? ` <span class="muted">${esc(it.sku)}</span>` : ''}</a> <b class="${d.kind === 'transfer' ? '' : l.qty < 0 ? 'neg' : 'pos'}">${l.qty > 0 && d.kind !== 'transfer' ? '+' : ''}${qtyU(l.qty, it.unit)}</b>`; }).join('<br>')}</div>` : ''}
+  </div>`;
+}
+
+function renderStockApp(tab) {
+  const c = stockCounts();
+  const noWh = !activeWhs().length;
+  let h = `
+    <div class="page-head">
+      <div><div class="eyebrow">Aplikace 03 · Sklad</div><h1>StockJoi</h1></div>
+      <div class="row">
+        <button class="btn" data-smove="in" ${noWh ? 'disabled' : ''}>↓ Naskladnit</button>
+        <button class="btn" data-smove="out" ${noWh ? 'disabled' : ''}>↑ Vyskladnit</button>
+        <button class="btn" data-smove="transfer" ${activeWhs().length < 2 ? 'disabled' : ''}>⇄ Přesunout</button>
+      </div>
+    </div>
+    <div class="tabs">${STOCK_TABS.map(([id, l]) => `<button class="tab ${id === tab ? 'active' : ''}" data-stab="${id}">${l}${id === 'prehled' && c.low ? `<span class="count" style="color:var(--bad)">${c.low}</span>` : ''}</button>`).join('')}</div>`;
+  const T = { prehled: stockOverview, pohyby: stockMovesTab, sklady: stockWarehousesTab, kategorie: stockCategoriesTab };
+  h += (T[tab] || stockOverview)();
+  $('#view').innerHTML = h;
+  bindStock();
+}
+function stockOverview() {
+  const whs = activeWhs(), c = stockCounts();
+  if (!whs.length) return `<div class="card empty"><div class="big">🏬</div><b>Nejdřív si založ sklad.</b><div class="small">Třeba „Hlavní sklad“, „Prodejna“, „Externí sklad“… Skladů můžeš mít kolik chceš.</div><div style="margin-top:14px"><button class="btn primary" data-editwh="">＋ Nový sklad</button></div></div>`;
+  const words = fold(ui.stockSearch).split(/\s+/).filter(Boolean);
+  const wf = ui.stockWh && stWh(ui.stockWh) ? ui.stockWh : '';
+  const qOf = it => wf ? lvl(it.id, wf) : lvlTotal(it.id);
+  let list = S.stock.items.filter(i => !i.archived)
+    .filter(i => !ui.stockCat || (ui.stockCat === '__none' ? !i.categoryId : i.categoryId === ui.stockCat))
+    .filter(i => !words.length || words.every(w => fold([i.sku, i.name, i.mpn, i.ean, stCat(i.categoryId)?.name, i.note].join(' ')).includes(w)))
+    .filter(i => ui.stockOnly === 'low' ? isLow(i) : ui.stockOnly === 'in' ? qOf(i) > 0 : true);
+  list.sort((a, b) => (isLow(b) - isLow(a)) || a.name.localeCompare(b.name, 'cs'));
+  const cols = !wf && whs.length > 1 && whs.length <= 5;
+  const today = todayIso();
+  const movesToday = new Set(S.stock.moves.filter(m => m.at.slice(0, 10) === today).map(m => m.doc)).size;
+  return `
+    <div class="stats">
+      <div class="stat"><div class="v">${c.items}</div><div class="l">skladových položek</div></div>
+      <div class="stat"><div class="v">${whs.length}</div><div class="l">${whs.length === 1 ? 'sklad' : whs.length < 5 ? 'sklady' : 'skladů'}</div></div>
+      <div class="stat"><div class="v" style="${c.low ? 'color:var(--bad)' : ''}">${c.low}</div><div class="l">pod minimem</div></div>
+      <div class="stat"><div class="v">${movesToday}</div><div class="l">pohybů dnes</div></div>
+    </div>
+    <div class="row s-tools">
+      <input type="search" id="s-search" placeholder="Hledat kód, název, MPN, EAN…" value="${esc(ui.stockSearch)}">
+      <select id="s-wh"><option value="">Všechny sklady</option>${whs.map(w => `<option value="${w.id}" ${wf === w.id ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>
+      <select id="s-cat"><option value="">Všechny kategorie</option>${S.stock.categories.map(k => `<option value="${k.id}" ${ui.stockCat === k.id ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}<option value="__none" ${ui.stockCat === '__none' ? 'selected' : ''}>Bez kategorie</option></select>
+      <div class="chips"><button class="chip ${!ui.stockOnly ? 'on' : ''}" data-sonly="">Vše</button><button class="chip ${ui.stockOnly === 'in' ? 'on' : ''}" data-sonly="in">Skladem</button><button class="chip ${ui.stockOnly === 'low' ? 'on' : ''}" data-sonly="low">Pod minimem</button></div>
+      <span class="grow"></span><button class="btn sm primary" data-edititem="">＋ Nová položka</button>
+    </div>
+    ${!S.stock.items.filter(i => !i.archived).length ? `<div class="card empty"><div class="big">📦</div><b>Zatím žádné skladové položky.</b><div class="small">Založ je tlačítkem „＋ Nová položka“, nebo rovnou přes „↓ Naskladnit“ — nové položky se při naskladnění založí samy.</div></div>`
+    : !list.length ? `<div class="card empty">Nic nenalezeno.</div>`
+    : `<div class="card" style="padding:4px 0"><div class="table-wrap"><table class="stock">
+      <thead><tr><th>Položka</th><th class="hide-m">Kategorie</th>${cols ? whs.map(w => `<th class="num hide-m">${esc(w.name)}</th>`).join('') : ''}<th class="num">${wf ? esc(stWh(wf).name) : 'Celkem'}</th></tr></thead>
+      <tbody>${list.slice(0, 500).map(i => { const q = qOf(i), low = isLow(i); return `<tr class="${low ? 'low' : ''}" data-sitem="${i.id}">
+        <td><a href="#/sklad/p/${i.id}" class="s-name">${esc(i.name)}</a><div class="sub">${[i.sku && `<code>${esc(i.sku)}</code>`, i.mpn && 'MPN ' + esc(i.mpn)].filter(Boolean).join(' · ')}${low ? ` <span class="badge bad">pod minimem ${fmtQty(i.minQty)}</span>` : ''}</div></td>
+        <td class="hide-m small">${esc(stCat(i.categoryId)?.name || '')}</td>
+        ${cols ? whs.map(w => { const x = lvl(i.id, w.id); return `<td class="num hide-m ${x < 0 ? 'neg' : x ? '' : 'muted'}">${x ? fmtQty(x) : '—'}</td>`; }).join('') : ''}
+        <td class="num"><b class="${q < 0 ? 'neg' : ''}">${fmtQty(q)}</b> <span class="muted small">${esc(i.unit)}</span></td></tr>`; }).join('')}</tbody></table></div>
+      ${list.length > 500 ? `<p class="small muted" style="padding:0 16px">Zobrazeno 500 z ${list.length} — upřesni hledání.</p>` : ''}</div>`}`;
+}
+function stockMovesTab() {
+  const words = fold(ui.stockMoveSearch).split(/\s+/).filter(Boolean);
+  let docs = groupDocs(S.stock.moves)
+    .filter(d => !ui.stockMoveKind || d.kind === ui.stockMoveKind)
+    .filter(d => !ui.stockWh || d.whs.includes(ui.stockWh))
+    .filter(d => !words.length || words.every(w => fold([d.ref, d.note, d.by, ...d.whs.map(x => stWh(x)?.name), ...d.lines.map(l => { const it = stItem(l.itemId); return it ? it.name + ' ' + it.sku : ''; })].join(' ')).includes(w)));
+  return `
+    <div class="row s-tools">
+      <input type="search" id="s-msearch" placeholder="Hledat referenci, položku, poznámku…" value="${esc(ui.stockMoveSearch)}">
+      <select id="s-wh"><option value="">Všechny sklady</option>${S.stock.warehouses.map(w => `<option value="${w.id}" ${ui.stockWh === w.id ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>
+      <div class="chips"><button class="chip ${!ui.stockMoveKind ? 'on' : ''}" data-smkind="">Vše</button>${Object.entries(MOVE_KIND).map(([k, v]) => `<button class="chip ${ui.stockMoveKind === k ? 'on' : ''}" data-smkind="${k}">${v[2]} ${v[0]}</button>`).join('')}</div>
+    </div>
+    ${!docs.length ? `<div class="card empty">${S.stock.moves.length ? 'Nic nenalezeno.' : 'Zatím žádné pohyby.'}</div>`
+      : `<div class="card" style="padding:6px 0">${docs.slice(0, 200).map(d => renderDoc(d)).join('')}</div>`}
+    ${S.stock.moves.length >= 600 ? '<p class="small muted">Zobrazeny poslední pohyby. Celou historii položky najdeš v jejím detailu.</p>' : ''}`;
+}
+function stockWarehousesTab() {
+  const whs = S.stock.warehouses;
+  const stat = w => { const its = S.stock.items.filter(i => lvl(i.id, w.id) > 0); return { n: its.length }; };
+  return `<div class="card">
+    <div class="card-head"><div><h2>Sklady</h2><div class="sub">Každý sklad má vlastní stav. Zboží mezi nimi přesouváš přes „⇄ Přesunout“.</div></div>
+      <button class="btn primary" data-editwh="">＋ Nový sklad</button></div>
+    ${!whs.length ? '<div class="empty">Zatím žádný sklad.</div>' : `<div class="table-wrap"><table><thead><tr><th>Sklad</th><th class="hide-m">Umístění</th><th class="num">Položek skladem</th><th></th></tr></thead><tbody>
+    ${whs.map(w => `<tr class="${w.archived ? 'done' : ''}"><td><b>${esc(w.name)}</b>${w.archived ? ' <span class="badge">archiv</span>' : ''}${w.note ? `<div class="sub">${esc(w.note)}</div>` : ''}</td>
+      <td class="hide-m small">${esc(w.location) || '<span class="muted">—</span>'}</td><td class="num">${stat(w).n}</td>
+      <td style="white-space:nowrap;text-align:right"><button class="btn sm ghost" data-whfilter="${w.id}">Zobrazit stav</button> <button class="icon-btn" data-editwh="${w.id}">✎</button></td></tr>`).join('')}
+    </tbody></table></div>`}
+  </div>`;
+}
+function stockCategoriesTab() {
+  const cnt = id => S.stock.items.filter(i => !i.archived && i.categoryId === id).length;
+  return `<div class="card">
+    <div class="card-head"><div><h2>Kategorie</h2><div class="sub">Pro přehlednost a filtrování položek.</div></div>
+      <button class="btn primary" data-editcat="">＋ Nová kategorie</button></div>
+    ${!S.stock.categories.length ? '<div class="empty">Zatím žádná kategorie.</div>' : `<div class="table-wrap"><table><thead><tr><th>Kategorie</th><th class="num">Položek</th><th></th></tr></thead><tbody>
+    ${S.stock.categories.map(k => `<tr><td><b>${esc(k.name)}</b></td><td class="num">${cnt(k.id)}</td>
+      <td style="white-space:nowrap;text-align:right"><button class="btn sm ghost" data-catfilter="${k.id}">Zobrazit</button> <button class="icon-btn" data-editcat="${k.id}">✎</button><button class="icon-btn" data-delcat="${k.id}" title="Smazat">🗑</button></td></tr>`).join('')}
+    </tbody></table></div>`}
+  </div>`;
+}
+function bindStock() {
+  const V = $('#view');
+  V.querySelectorAll('[data-stab]').forEach(b => b.onclick = () => { location.hash = '#/sklad/' + b.dataset.stab; });
+  V.querySelectorAll('[data-smove]').forEach(b => b.onclick = () => stockMoveModal(b.dataset.smove));
+  V.querySelectorAll('[data-edititem]').forEach(b => b.onclick = () => editStockItem(b.dataset.edititem));
+  V.querySelectorAll('[data-editwh]').forEach(b => b.onclick = () => editWarehouse(b.dataset.editwh));
+  V.querySelectorAll('[data-editcat]').forEach(b => b.onclick = () => editCategory(b.dataset.editcat));
+  V.querySelectorAll('[data-whfilter]').forEach(b => b.onclick = () => { ui.stockWh = b.dataset.whfilter; location.hash = '#/sklad/prehled'; });
+  V.querySelectorAll('[data-catfilter]').forEach(b => b.onclick = () => { ui.stockCat = b.dataset.catfilter; location.hash = '#/sklad/prehled'; });
+  V.querySelectorAll('[data-delcat]').forEach(b => b.onclick = () => {
+    const k = stCat(b.dataset.delcat); if (!confirm(`Smazat kategorii „${k.name}“? Položky zůstanou, jen budou bez kategorie.`)) return;
+    act(async () => ok(await sb.from('stock_categories').delete().eq('id', k.id)), 'Kategorie smazána');
+  });
+  V.querySelectorAll('[data-sonly]').forEach(b => b.onclick = () => { ui.stockOnly = b.dataset.sonly; render(); });
+  V.querySelectorAll('[data-smkind]').forEach(b => b.onclick = () => { ui.stockMoveKind = b.dataset.smkind; render(); });
+  if ($('#s-wh')) $('#s-wh').onchange = () => { ui.stockWh = $('#s-wh').value; render(); };
+  if ($('#s-cat')) $('#s-cat').onchange = () => { ui.stockCat = $('#s-cat').value; render(); };
+  for (const [id, key] of [['s-search', 'stockSearch'], ['s-msearch', 'stockMoveSearch']]) {
+    const el = $('#' + id); if (!el) continue;
+    el.oninput = () => { ui[key] = el.value; const pos = el.selectionStart; render(); const n = $('#' + id); n.focus(); n.setSelectionRange(pos, pos); };
+  }
+  V.querySelectorAll('tr[data-sitem]').forEach(tr => tr.onclick = e => { if (!e.target.closest('a,button')) location.hash = '#/sklad/p/' + tr.dataset.sitem; });
+  bindDocDelete(V);
+}
+function bindDocDelete(V) {
+  V.querySelectorAll('[data-deldoc-s]').forEach(b => b.onclick = () => {
+    if (!confirm('Smazat tenhle pohyb? Stav skladu se vrátí, jako by se nestal. (Použij při chybném zadání.)')) return;
+    act(async () => ok(await sb.from('stock_moves').delete().eq('doc_id', b.getAttribute('data-deldoc-s'))), 'Pohyb smazán');
+  });
+}
+
+// --- detail položky
+async function renderStockItem(id) {
+  const it = stItem(id);
+  if (!it) { $('#view').innerHTML = `<div class="card empty">Položka nenalezena. <a href="#/sklad">Zpět</a></div>`; return; }
+  const whs = S.stock.warehouses.filter(w => !w.archived || lvl(id, w.id));
+  const total = lvlTotal(id);
+  $('#view').innerHTML = `
+    <div class="page-head">
+      <div><a class="small muted" href="#/sklad" style="text-decoration:none">← StockJoi</a>
+        <h1>${esc(it.name)}</h1>
+        <div class="sub">${[it.sku && 'Kód ' + esc(it.sku), it.mpn && 'MPN ' + esc(it.mpn), it.ean && 'EAN ' + esc(it.ean), stCat(it.categoryId) && esc(stCat(it.categoryId).name)].filter(Boolean).join(' · ') || '&nbsp;'}${it.archived ? ' · <span class="badge">archiv</span>' : ''}</div></div>
+      <div class="row"><button class="btn sm" id="si-edit">✎ Upravit</button></div>
+    </div>
+    <div class="stats s-stats">
+      <div class="stat"><div class="v ${total < 0 ? 'neg' : ''}" style="${isLow(it) ? 'color:var(--bad)' : ''}">${fmtQty(total)} <span class="small muted">${esc(it.unit)}</span></div><div class="l">celkem skladem${it.minQty != null ? ` · minimum ${fmtQty(it.minQty)}` : ''}</div></div>
+      ${whs.map(w => `<div class="stat"><div class="v">${fmtQty(lvl(id, w.id))}</div><div class="l">${esc(w.name)}</div></div>`).join('')}
+    </div>
+    <div class="row" style="gap:8px;margin-bottom:16px;flex-wrap:wrap">
+      <button class="btn" data-simove="in">↓ Naskladnit</button>
+      <button class="btn" data-simove="out">↑ Vyskladnit</button>
+      ${activeWhs().length > 1 ? '<button class="btn" data-simove="transfer">⇄ Přesunout</button>' : ''}
+      <button class="btn ghost" id="si-inv">≡ Inventura</button>
+    </div>
+    ${it.note ? `<div class="card"><h3 style="margin-top:0">Poznámka</h3><div class="small" style="white-space:pre-wrap">${esc(it.note)}</div></div>` : ''}
+    <div class="card" style="padding:6px 0"><div class="card-head" style="padding:10px 18px 0"><h2 style="margin:0">Historie pohybů</h2></div><div id="si-hist"><div class="empty small">Načítám…</div></div></div>`;
+  $('#si-edit').onclick = () => editStockItem(id);
+  $('#si-inv').onclick = () => inventoryModal(id);
+  document.querySelectorAll('[data-simove]').forEach(b => b.onclick = () => stockMoveModal(b.dataset.simove, { itemId: id }));
+  try {
+    const rows = ok(await sb.from('stock_moves').select('*').eq('item_id', id).order('created_at', { ascending: false }).limit(500));
+    if (route().id !== id) return;
+    const ms = rows.map(m => ({ id: m.id, doc: m.doc_id, kind: m.kind, itemId: m.item_id, whId: m.warehouse_id, qty: Number(m.qty), ref: m.reference || '', note: m.note || '', by: m.created_by || '', at: m.created_at }));
+    const docs = groupDocs(ms);
+    $('#si-hist').innerHTML = docs.length ? docs.map(d => renderDoc(d)).join('') : '<div class="empty small">Zatím žádné pohyby.</div>';
+    bindDocDelete($('#si-hist'));
+  } catch (e) { $('#si-hist').innerHTML = `<div class="empty small">Chyba: ${esc(e.message)}</div>`; }
+}
+
+// --- naskladnění / vyskladnění / přesun
+function stockMoveModal(kind, { itemId = '' } = {}) {
+  const whs = activeWhs(), k = MOVE_KIND[kind];
+  const defWh = ui.stockWh && stWh(ui.stockWh) && !stWh(ui.stockWh).archived ? ui.stockWh : whs[0]?.id;
+  const whSel = (id, cur) => `<select id="${id}">${whs.map(w => `<option value="${w.id}" ${w.id === cur ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>`;
+  const items = S.stock.items.filter(i => !i.archived);
+  const pre = itemId ? stItem(itemId) : null;
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:720px">
+    <div class="modal-head"><h2>${k[2]} ${k[0]}</h2><button class="icon-btn" data-close>✕</button></div>
+    <div class="stack">
+      <div class="grid-2">
+        ${kind === 'transfer'
+          ? `<label class="field"><span>Ze skladu</span>${whSel('sm-wh', defWh)}</label><label class="field"><span>Do skladu</span>${whSel('sm-wh2', whs.find(w => w.id !== defWh)?.id)}</label>`
+          : `<label class="field"><span>${kind === 'in' ? 'Do skladu' : 'Ze skladu'}</span>${whSel('sm-wh', defWh)}</label>`}
+        <label class="field"><span>Reference ${kind === 'in' ? '(dodací list, AUF…)' : kind === 'out' ? '(číslo objednávky, zakázka…)' : ''}</span><input type="text" id="sm-ref"></label>
+      </div>
+      <div>
+        <div class="sm-head small muted"><span>Položka</span><span>Množství</span><span></span></div>
+        <div id="sm-rows"></div>
+        <datalist id="sm-items">${items.map(i => `<option value="${esc(itemLabel(i))}">`).join('')}</datalist>
+        <div style="margin-top:8px"><button class="btn sm ghost" id="sm-add">＋ Další položka</button></div>
+        ${kind === 'in' ? '<div class="small muted" style="margin-top:6px">Napiš kód nebo název. Když položka ještě neexistuje, založí se nová.</div>' : ''}
+      </div>
+      <label class="field"><span>Poznámka</span><input type="text" id="sm-note"></label>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="sm-save">${k[0] === 'Přesun' ? 'Přesunout' : k[0] === 'Naskladnění' ? 'Naskladnit' : 'Vyskladnit'}</button></div>
+  </div></div>`;
+  const root = $('#sm-rows');
+  const hint = row => {
+    const it = resolveItem(row.querySelector('.sm-item').value); const h = row.querySelector('.sm-hint');
+    if (!it) { h.textContent = row.querySelector('.sm-item').value.trim() && kind === 'in' ? 'nová položka' : ''; return; }
+    h.textContent = kind === 'in' ? `skladem ${fmtQty(lvl(it.id, $('#sm-wh').value))} ${it.unit}` : `k dispozici ${fmtQty(lvl(it.id, $('#sm-wh').value))} ${it.unit}`;
+  };
+  const addRow = (label = '') => {
+    root.insertAdjacentHTML('beforeend', `<div class="sm-row"><div><input type="text" class="sm-item" list="sm-items" placeholder="Kód nebo název" value="${esc(label)}" autocomplete="off"><div class="sm-hint small muted"></div></div>
+      <input type="text" class="sm-qty" inputmode="decimal" placeholder="0"><button class="icon-btn sm-del" title="Odebrat">✕</button></div>`);
+    const row = root.lastElementChild;
+    row.querySelector('.sm-item').addEventListener('input', () => hint(row));
+    row.querySelector('.sm-del').onclick = () => { row.remove(); if (!root.children.length) addRow(); };
+    hint(row); return row;
+  };
+  addRow(pre ? itemLabel(pre) : '');
+  $('#sm-add').onclick = () => addRow().querySelector('.sm-item').focus();
+  $('#sm-wh').onchange = () => root.querySelectorAll('.sm-row').forEach(hint);
+  $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = closeModal);
+  (pre ? root.querySelector('.sm-qty') : root.querySelector('.sm-item')).focus();
+  $('#sm-save').onclick = async () => {
+    const wh = $('#sm-wh').value, wh2 = kind === 'transfer' ? $('#sm-wh2').value : '';
+    if (kind === 'transfer' && wh === wh2) return toast('Vyber dva různé sklady');
+    const lines = [], unknown = [];
+    for (const row of root.querySelectorAll('.sm-row')) {
+      const txt = row.querySelector('.sm-item').value.trim(), qty = Number(row.querySelector('.sm-qty').value.replace(/\s/g, '').replace(',', '.'));
+      if (!txt && !row.querySelector('.sm-qty').value.trim()) continue;
+      if (!txt) return toast('Vyplň položku');
+      if (!(qty > 0)) return toast(`Zadej množství u „${txt}“`);
+      const it = resolveItem(txt);
+      if (!it) { if (kind !== 'in') return toast(`Položka „${txt}“ neexistuje`); unknown.push(txt); }
+      lines.push({ it, txt, qty });
+    }
+    if (!lines.length) return toast('Přidej aspoň jednu položku');
+    if (unknown.length && !confirm(`Založit ${plural(unknown.length, 'novou položku', 'nové položky', 'nových položek')}?\n\n${[...new Set(unknown)].join('\n')}`)) return;
+    if (kind !== 'in') {
+      const need = {}; for (const l of lines) need[l.it.id] = (need[l.it.id] || 0) + l.qty;
+      const short = Object.entries(need).filter(([id, q]) => q > lvl(id, wh)).map(([id, q]) => `${stItem(id).name}: chce ${fmtQty(q)}, skladem ${fmtQty(lvl(id, wh))}`);
+      if (short.length && !confirm(`Na skladu „${stWh(wh).name}“ není dost zboží:\n\n${short.join('\n')}\n\nPřesto pokračovat? (stav půjde do minusu)`)) return;
+    }
+    const ref = $('#sm-ref').value.trim(), note = $('#sm-note').value.trim();
+    closeModal();
+    await act(async () => {
+      const created = {};
+      for (const name of [...new Set(unknown)]) created[name] = ok(await sb.from('stock_items').insert({ name, unit: 'ks' }).select().single()).id;
+      const doc = crypto.randomUUID(), rows = [];
+      for (const l of lines) {
+        const item_id = l.it ? l.it.id : created[l.txt];
+        if (kind === 'transfer') rows.push({ doc_id: doc, kind, item_id, warehouse_id: wh, qty: -l.qty, reference: ref, note }, { doc_id: doc, kind, item_id, warehouse_id: wh2, qty: l.qty, reference: ref, note });
+        else rows.push({ doc_id: doc, kind, item_id, warehouse_id: wh, qty: kind === 'in' ? l.qty : -l.qty, reference: ref, note });
+      }
+      ok(await sb.from('stock_moves').insert(rows));
+    }, kind === 'in' ? 'Naskladněno ✓' : kind === 'out' ? 'Vyskladněno ✓' : 'Přesunuto ✓');
+  };
+}
+// „SKU · název“, samotný kód nebo přesný název → položka
+function resolveItem(txt) {
+  const t = fold(txt.trim()); if (!t) return null;
+  const items = S.stock.items.filter(i => !i.archived);
+  return items.find(i => fold(itemLabel(i)) === t) || items.find(i => i.sku && fold(i.sku) === t) || items.find(i => fold(i.name) === t)
+    || items.find(i => (i.mpn && fold(i.mpn) === t) || (i.ean && fold(i.ean) === t)) || null;
+}
+function inventoryModal(id) {
+  const it = stItem(id), whs = S.stock.warehouses.filter(w => !w.archived || lvl(id, w.id));
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:520px">
+    <div class="modal-head"><h2>≡ Inventura · ${esc(it.name)}</h2><button class="icon-btn" data-close>✕</button></div>
+    <p class="small muted" style="margin-top:0">Zadej, kolik je skutečně na skladě. Rozdíl se zapíše jako pohyb „Inventura“.</p>
+    <div class="stack">${whs.map(w => `<label class="field"><span>${esc(w.name)} <span class="muted">(evidováno ${fmtQty(lvl(id, w.id))} ${esc(it.unit)})</span></span><input type="text" inputmode="decimal" data-invwh="${w.id}" value="${fmtQty(lvl(id, w.id)).replace(/\s/g, '')}"></label>`).join('')}
+      <label class="field"><span>Poznámka</span><input type="text" id="inv-note" placeholder="např. roční inventura"></label></div>
+    <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="inv-save">Uložit</button></div>
+  </div></div>`;
+  $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = closeModal);
+  $('#inv-save').onclick = async () => {
+    const doc = crypto.randomUUID(), note = $('#inv-note').value.trim(), rows = [];
+    for (const inp of document.querySelectorAll('[data-invwh]')) {
+      const v = Number(inp.value.replace(/\s/g, '').replace(',', '.'));
+      if (inp.value.trim() === '' || !Number.isFinite(v)) return toast('Zadej čísla');
+      const d = Math.round((v - lvl(id, inp.dataset.invwh)) * 1000) / 1000;
+      if (d) rows.push({ doc_id: doc, kind: 'adjust', item_id: id, warehouse_id: inp.dataset.invwh, qty: d, note });
+    }
+    closeModal();
+    if (!rows.length) return toast('Beze změny');
+    await act(async () => ok(await sb.from('stock_moves').insert(rows)), 'Inventura uložena ✓');
+  };
+}
+
+// --- položka / sklad / kategorie
+function editStockItem(id) {
+  const it = stItem(id) || { id: '', sku: '', name: '', categoryId: ui.stockCat && ui.stockCat !== '__none' ? ui.stockCat : '', unit: 'ks', mpn: '', ean: '', minQty: null, note: '', archived: false };
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:640px">
+    <div class="modal-head"><h2>${id ? 'Upravit položku' : 'Nová skladová položka'}</h2><button class="icon-btn" data-close>✕</button></div>
+    <div class="stack">
+      <div class="grid-2">
+        <label class="field"><span>Kód (náš)</span><input type="text" id="it-sku" value="${esc(it.sku)}" autocomplete="off"></label>
+        <label class="field"><span>Název *</span><input type="text" id="it-name" value="${esc(it.name)}"></label>
+        <label class="field"><span>Kategorie</span><select id="it-cat"><option value="">— bez kategorie —</option>${S.stock.categories.map(k => `<option value="${k.id}" ${k.id === it.categoryId ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}<option value="__new">＋ Nová kategorie…</option></select></label>
+        <label class="field"><span>Jednotka</span><input type="text" id="it-unit" value="${esc(it.unit)}" list="it-units"></label>
+        <label class="field"><span>MPN (kód výrobce)</span><input type="text" id="it-mpn" value="${esc(it.mpn)}"></label>
+        <label class="field"><span>EAN</span><input type="text" id="it-ean" inputmode="numeric" value="${esc(it.ean)}"></label>
+        <label class="field"><span>Minimální zásoba (upozornění)</span><input type="text" id="it-min" inputmode="decimal" value="${it.minQty == null ? '' : fmtQty(it.minQty).replace(/\s/g, '')}" placeholder="nepovinné"></label>
+      </div>
+      <label class="field"><span>Poznámka</span><textarea id="it-note" style="min-height:60px">${esc(it.note)}</textarea></label>
+      <datalist id="it-units">${['ks', 'm', 'm²', 'bm', 'kg', 'bal', 'sada', 'role', 'paleta'].map(u => `<option value="${u}">`).join('')}</datalist>
+    </div>
+    <div class="modal-foot">${id ? `<button class="btn ghost" id="it-arch" style="margin-right:auto">${it.archived ? '↩ Obnovit' : '🗄 Archivovat'}</button>` : ''}<button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="it-save">Uložit</button></div>
+  </div></div>`;
+  $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = closeModal);
+  $('#it-cat').onchange = () => { if ($('#it-cat').value !== '__new') return; const n = prompt('Název nové kategorie'); const sel = $('#it-cat'); if (!n?.trim()) { sel.value = it.categoryId || ''; return; } sel.insertAdjacentHTML('beforeend', `<option value="__new:${esc(n.trim())}" selected>${esc(n.trim())}</option>`); };
+  (id ? $('#it-name') : $('#it-sku')).focus();
+  if ($('#it-arch')) $('#it-arch').onclick = () => { closeModal(); act(async () => ok(await sb.from('stock_items').update({ archived: !it.archived }).eq('id', id)), it.archived ? 'Obnoveno' : 'Archivováno'); };
+  $('#it-save').onclick = async () => {
+    const g = k => $('#it-' + k).value.trim();
+    const minTxt = g('min'), min = minTxt === '' ? null : Number(minTxt.replace(',', '.'));
+    if (!g('name')) return toast('Vyplň název');
+    if (minTxt !== '' && !Number.isFinite(min)) return toast('Minimum musí být číslo');
+    if (g('sku') && S.stock.items.some(x => x.id !== id && x.sku && fold(x.sku) === fold(g('sku')))) return toast(`Kód ${g('sku')} už má jiná položka`);
+    let cat = $('#it-cat').value;
+    const row = { sku: g('sku'), name: g('name'), unit: g('unit') || 'ks', mpn: g('mpn'), ean: g('ean'), min_qty: min, note: g('note'), updated_at: new Date().toISOString() };
+    closeModal();
+    const saved = await act(async () => {
+      if (cat.startsWith('__new:')) cat = ok(await sb.from('stock_categories').insert({ name: cat.slice(6) }).select().single()).id;
+      row.category_id = cat && cat !== '__new' ? cat : null;
+      return id ? ok(await sb.from('stock_items').update(row).eq('id', id).select().single()) : ok(await sb.from('stock_items').insert(row).select().single());
+    }, 'Uloženo ✓');
+    if (saved && !id) location.hash = '#/sklad/p/' + saved.id;
+  };
+}
+function editWarehouse(id) {
+  const w = stWh(id) || { id: '', name: '', location: '', note: '', archived: false };
+  const has = id && S.stock.moves.some(m => m.whId === id);
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:480px">
+    <div class="modal-head"><h2>${id ? 'Upravit sklad' : 'Nový sklad'}</h2><button class="icon-btn" data-close>✕</button></div>
+    <div class="stack">
+      <label class="field"><span>Název *</span><input type="text" id="wh-name" value="${esc(w.name)}" placeholder="např. Hlavní sklad"></label>
+      <label class="field"><span>Umístění / adresa</span><input type="text" id="wh-location" value="${esc(w.location)}"></label>
+      <label class="field"><span>Poznámka</span><input type="text" id="wh-note" value="${esc(w.note)}"></label>
+    </div>
+    <div class="modal-foot">${id ? `<button class="btn ghost" id="wh-del" style="margin-right:auto">${has ? (w.archived ? '↩ Obnovit' : '🗄 Archivovat') : '🗑 Smazat'}</button>` : ''}<button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="wh-save">Uložit</button></div>
+  </div></div>`;
+  $('#modal-root').querySelectorAll('[data-close]').forEach(b => b.onclick = closeModal);
+  $('#wh-name').focus();
+  if ($('#wh-del')) $('#wh-del').onclick = () => {
+    closeModal();
+    if (has) return act(async () => ok(await sb.from('stock_warehouses').update({ archived: !w.archived }).eq('id', id)), w.archived ? 'Obnoveno' : 'Sklad archivován');
+    if (!confirm(`Smazat sklad „${w.name}“?`)) return;
+    act(async () => ok(await sb.from('stock_warehouses').delete().eq('id', id)), 'Sklad smazán');
+  };
+  $('#wh-save').onclick = () => {
+    const row = { name: $('#wh-name').value.trim(), location: $('#wh-location').value.trim(), note: $('#wh-note').value.trim() };
+    if (!row.name) return toast('Vyplň název');
+    closeModal();
+    act(async () => id ? ok(await sb.from('stock_warehouses').update(row).eq('id', id)) : ok(await sb.from('stock_warehouses').insert({ ...row, sort: S.stock.warehouses.length })), 'Sklad uložen ✓');
+  };
+}
+function editCategory(id) {
+  const k = stCat(id);
+  const n = prompt(k ? 'Přejmenovat kategorii' : 'Název nové kategorie', k ? k.name : '');
+  if (!n?.trim()) return;
+  act(async () => k ? ok(await sb.from('stock_categories').update({ name: n.trim() }).eq('id', id)) : ok(await sb.from('stock_categories').insert({ name: n.trim(), sort: S.stock.categories.length })), 'Uloženo ✓');
 }
 
 // ---------- APLIKACE 02: EMAILJOI ----------
@@ -457,7 +886,7 @@ function renderOrdersApp(tab) {
   const tabCount = { objednavky: c.todo, aufy: c.sentAufs, svozy: c.unshipped, dodavatele: S.suppliers.length };
   let html = `
     <div class="page-head">
-      <div><div class="eyebrow">Aplikace 01 · Objednávky od dodavatelů</div><h1>OrderJoi</h1></div>
+      <div><div class="eyebrow">Aplikace 01 · Vinylor · objednávky od dodavatelů</div><h1>OrderJoi</h1></div>
       <div class="row">
         <span class="small muted">Shoptet: ${S.sync.error ? `<span style="color:var(--bad)">chyba</span>` : ago(S.sync.fetchedAt)}</span>
         <button class="btn" id="btn-sync">↻ Načíst ze Shoptetu</button>
@@ -481,9 +910,14 @@ async function doSync() {
 function tabOrders() {
   const c = counts();
   const archived = ui.orderFilter === 'archive';
-  const list = S.orders.filter(o => o.archived === archived)
+  const words = fold(ui.orderSearch).split(/\s+/).filter(Boolean);
+  // hledá v čísle objednávky, AUF číslech, zákazníkovi, poznámkách i položkách (i v archivu)
+  const hay = o => fold([o.code, o.customer, o.note, o.shoptetStatus,
+    ...aufsOf(o.code).flatMap(a => [a.aufNumber, a.note, supName(a.supplierId)]),
+    ...S.items.filter(i => i.orderCode === o.code).flatMap(i => [i.code, i.name, i.variant, prod(i.code).mpn])].join(' '));
+  const list = S.orders.filter(o => words.length ? words.every(w => hay(o).includes(w)) : o.archived === archived)
     .map(o => ({ o, st: orderState(o.code) }))
-    .filter(x => archived || x.st !== 'empty' || x.o.active)
+    .filter(x => words.length || archived || x.st !== 'empty' || x.o.active)
     .sort((a, b) => STATE[a.st][2] - STATE[b.st][2] || String(b.o.date).localeCompare(String(a.o.date)) || b.o.code.localeCompare(a.o.code));
   let h = `<div class="stats">
       <div class="stat"><div class="v" style="${c.todo ? 'color:var(--warn)' : ''}">${c.todo}</div><div class="l">potřeba objednat</div></div>
@@ -491,17 +925,20 @@ function tabOrders() {
       <div class="stat"><div class="v">${c.unshipped}</div><div class="l">AUF bez svozu</div></div>
       <div class="stat"><div class="v">${c.shipping}</div><div class="l">naplánované svozy</div></div>
     </div>
-    <div class="row" style="margin-bottom:12px">
-      <div class="chips"><button class="chip ${!archived ? 'on' : ''}" data-ofilter="active">Aktivní</button><button class="chip ${archived ? 'on' : ''}" data-ofilter="archive">Archiv</button></div>
+    <div class="row o-tools" style="margin-bottom:12px">
+      <input type="search" id="o-search" placeholder="Hledat: číslo objednávky, AUF, jméno, reference…" value="${esc(ui.orderSearch)}">
+      <div class="chips" ${words.length ? 'style="opacity:.45"' : ''}><button class="chip ${!archived ? 'on' : ''}" data-ofilter="active">Aktivní</button><button class="chip ${archived ? 'on' : ''}" data-ofilter="archive">Archiv</button></div>
       <div class="grow"></div><button class="btn sm" data-neworder>＋ Ruční objednávka</button>
     </div>`;
+  if (words.length && !list.length) return h + `<div class="card empty"><b>Nic nenalezeno pro „${esc(ui.orderSearch)}“.</b><div class="small">Hledá se v aktivních i archivovaných objednávkách.</div></div>`;
+  if (words.length) h += `<div class="small muted" style="margin:-4px 0 10px">${plural(list.length, 'výsledek', 'výsledky', 'výsledků')} — aktivní i archiv</div>`;
   if (!list.length) return h + `<div class="card empty"><div class="big">✓</div><b>${archived ? 'Archiv je prázdný.' : `Žádné objednávky ve stavu „${esc(S.settings.statusValue)}“.`}</b><div class="small">${!archived && S.sync.fetchedAt ? 'Poslední načtení ' + ago(S.sync.fetchedAt) + '.' : ''}</div></div>`;
   h += `<div class="card" style="padding:6px 0"><div class="olist">${list.map(({ o, st }) => {
     const its = orderItems(o.code);
     const sups = [...new Set(its.filter(i => effDec(i) === 'order' && effSup(i)).map(effSup))];
     const aufs = aufsOf(o.code).filter(a => a.aufNumber);
     return `<a class="orow" href="#/objednavky/o/${encodeURIComponent(o.code)}">
-      <div class="grow"><div class="row" style="gap:8px"><b>${esc(o.code)}</b>${o.manual ? '<span class="badge">ručně</span>' : ''}${o.note ? '<span title="Má poznámku">📝</span>' : ''}${!o.manual && !o.active && o.shoptetStatus ? `<span class="sub">Shoptet: ${esc(o.shoptetStatus)}</span>` : ''}</div>
+      <div class="grow"><div class="row" style="gap:8px"><b>${esc(o.code)}</b>${o.manual ? '<span class="badge">ručně</span>' : ''}${words.length && o.archived ? '<span class="badge">archiv</span>' : ''}${o.note ? '<span title="Má poznámku">📝</span>' : ''}${!o.manual && !o.active && o.shoptetStatus ? `<span class="sub">Shoptet: ${esc(o.shoptetStatus)}</span>` : ''}</div>
         <div class="sub">${esc(o.customer || '')}${o.customer && o.date ? ' · ' : ''}${esc(String(o.date).slice(0, 10))} · ${plural(its.length, 'položka', 'položky', 'položek')}${sups.length ? ' · ' + sups.map(s => `${flag(supplierById(s)?.country)} ${esc(supName(s))}`).join(', ') : ''}${aufs.length ? ' · AUF ' + aufs.map(a => esc(a.aufNumber)).join(', ') : ''}</div></div>
       <span class="badge ${STATE[st][1]}">${STATE[st][0]}</span><span class="chev">›</span></a>`;
   }).join('')}</div></div>`;
@@ -1164,7 +1601,9 @@ function editProduct(code) {
 // ---------- bindings (záložky) ----------
 function bind() {
   const V = $('#view');
-  V.querySelectorAll('[data-ofilter]').forEach(b => b.onclick = () => { ui.orderFilter = b.dataset.ofilter; render(); });
+  V.querySelectorAll('[data-ofilter]').forEach(b => b.onclick = () => { ui.orderFilter = b.dataset.ofilter; ui.orderSearch = ''; render(); });
+  const os = $('#o-search');
+  if (os) os.oninput = () => { ui.orderSearch = os.value; const pos = os.selectionStart; render(); const n = $('#o-search'); n.focus(); n.setSelectionRange(pos, pos); };
   V.querySelectorAll('[data-neworder]').forEach(b => b.onclick = () => editManualOrder(''));
   V.querySelectorAll('[data-afilter]').forEach(b => b.onclick = () => { ui.aufFilter = b.dataset.afilter; render(); });
   V.querySelectorAll('[data-togglepast]').forEach(b => b.onclick = () => { ui.showPast = !ui.showPast; render(); });
