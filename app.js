@@ -1455,7 +1455,7 @@ function warehouseMessage(s, o) {
 }
 function openWarehouseMsg(id) {
   const s = shipmentById(id);
-  const o = { customer: true, supplier: false, amount: false, note: true, intro: 'Ahoj, posílám AUFy do svozu:', phone: '', ...S.settings.warehouseMsg };
+  const o = { customer: true, supplier: false, amount: false, note: true, intro: 'Dobrý den, posílám Vám AUFy do svozu:', phone: '', ...S.settings.warehouseMsg };
   $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:600px">
     <div class="modal-head"><h2>💬 Zpráva pro sklad</h2><button class="icon-btn" data-close>✕</button></div>
     <div class="stack">
