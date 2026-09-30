@@ -125,7 +125,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 24px 20px 60px; }
 
 label.field { display: block; }
 label.field > span { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .6px; }
-input[type=text], input[type=email], input[type=password], input[type=number], input[type=url], input[type=search], input[type=tel], input[type=date], select, textarea {
+input[type=text], input[type=email], input[type=password], input[type=number], input[type=url], input[type=search], input[type=tel], input[type=date], input[type=time], select, textarea {
   width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); color: var(--text); outline: none;
 }
 input:focus, select:focus, textarea:focus { border-color: var(--focus); }
@@ -364,3 +364,32 @@ label.chip { display: inline-flex; align-items: center; user-select: none; }
 .imp-drop:hover, .imp-drop.over { border-color: var(--hover-border); background: var(--hover); }
 .imp-qty { gap: 8px; margin-bottom: 6px; flex-wrap: nowrap; }
 .imp-qty select { flex: 1; min-width: 0; }
+
+/* ---------- DocházkoBot ---------- */
+.att-dot { color: var(--info); margin-left: 4px; }
+.att-dot.done { color: var(--ok); }
+.tab.active .att-dot { color: inherit; }
+table.att-over tbody tr, table.att-days tbody tr { cursor: pointer; }
+table.att-over tbody tr:hover td, table.att-days tbody tr:hover td { background: var(--hover); }
+table.att-days tr.we td { background: color-mix(in srgb, var(--muted) 8%, transparent); }
+table.att-days tr.hol td { background: color-mix(in srgb, var(--warn) 10%, transparent); }
+table.att-days td { vertical-align: top; }
+table.att-days .raw { font-size: 11px; color: var(--dim); }
+.att-stats { grid-template-columns: repeat(6, 1fr); }
+.chk { font-size: 12px; font-weight: 600; margin-left: 10px; }
+.chk.ok { color: var(--ok); } .chk.bad { color: var(--bad); }
+.ad-row { display: grid; grid-template-columns: 1.6fr 1fr 1fr .7fr auto 32px; gap: 8px; align-items: center; }
+.ad-row label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.mem-list { display: flex; flex-direction: column; gap: 6px; }
+.mem { display: flex; gap: 10px; align-items: flex-start; font-size: 13.5px; padding: 8px 0; border-bottom: 1px solid var(--row-line); }
+.mem:last-child { border-bottom: 0; }
+@media (max-width: 640px) {
+  .att-stats { grid-template-columns: repeat(2, 1fr); }
+  .ad-row { grid-template-columns: 1fr 1fr 32px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+  .ad-row .ad-kind { grid-column: 1 / 3; grid-row: 1; } .ad-row .ad-del { grid-column: 3; grid-row: 1; }
+  .ad-row .ad-start { grid-column: 1; grid-row: 2; } .ad-row .ad-end { grid-column: 2; grid-row: 2; }
+  .ad-row .ad-hours { grid-column: 1; grid-row: 3; } .ad-row label { grid-column: 2; grid-row: 3; }
+}
+
+.att-month { display: inline-flex; align-items: center; gap: 4px; }
+.att-month b { min-width: 118px; text-align: center; text-transform: capitalize; }
