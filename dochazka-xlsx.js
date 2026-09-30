@@ -1,6 +1,6 @@
 // SmartJoi · DocházkoBot — „Evidence pracovní doby“ pro účetní (ExcelJS, věrně podle předlohy od účetní)
-// Hodnoty spočítá aplikace (dochazka-core.js) a zapíšou se jako čísla — bez vzorců, aby soubor ukazoval
-// správné součty v Excelu, Numbers, náhledu i v chráněném zobrazení.
+// Vzorce jsou stejné jako v předloze (Excel i Numbers s nimi počítají časy správně) a ke každému je uložený
+// i výsledek spočítaný aplikací, takže správná čísla ukáže i náhled nebo chráněné zobrazení.
 import { MONTH_NAMES, hours } from './dochazka-core.js';
 
 const EXCELJS_URL = 'https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';
@@ -71,7 +71,7 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
   ws.getRow(8).height = 19; ws.getRow(9).height = 19;
 
   // dny
-  let r = 10;
+  let r = 10; const wkI = [], holG = [];
   for (const d of comp.days) {
     const n = Math.max(1, d.segs.length), r0 = r;
     const fill = d.holiday && !d.weekend ? HOL : d.weekend ? WEEKEND : null;
@@ -85,8 +85,9 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
       }
       const s = d.segs[i], len = s ? s.e - s.s : 0;
       if (s) { ws.getCell(`C${r}`).value = T(s.s); ws.getCell(`D${r}`).value = T(s.e); }
-      ws.getCell(`H${r}`).value = T(len);                                                              // Čas v práci (D − C)
-      ws.getCell(`I${r}`).value = T(Math.max(0, len - (i === 0 && d.lunch ? d.lunch.e - d.lunch.s : 0))); // netto (H − oběd)
+      ws.getCell(`H${r}`).value = { formula: `D${r}-C${r}`, result: T(len) };                                                      // Čas v práci
+      ws.getCell(`I${r}`).value = { formula: `H${r}+(E${r}-F${r})`, result: T(len - (i === 0 && d.lunch ? d.lunch.e - d.lunch.s : 0)) }; // netto
+      if ((d.weekend || d.holiday) && d.netto) wkI.push(`I${r}`);
     }
     const setV = (c, v) => { if (v) ws.getCell(`${c}${r0}`).value = T(v); };
     ws.getCell(`A${r0}`).value = new Date(Date.UTC(Y, M - 1, d.day)); ws.getCell(`A${r0}`).numFmt = F_DATE;
@@ -95,7 +96,8 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
     setV('G', d.fund);
     if (d.blocks[0]) { ws.getCell(`J${r0}`).value = T(d.blocks[0][0]); ws.getCell(`K${r0}`).value = T(d.blocks[0][1]); }
     if (d.blocks[1]) { ws.getCell(`L${r0}`).value = T(d.blocks[1][0]); ws.getCell(`M${r0}`).value = T(d.blocks[1][1]); }
-    ws.getCell(`N${r0}`).value = T(d.over || 0);
+    ws.getCell(`N${r0}`).value = { formula: `(K${r0}-J${r0})+(M${r0}-L${r0})`, result: T(d.over || 0) };
+    if (d.holiday && !d.weekend) holG.push(`G${r0}`);
     setV('O', d.vac); setV('P', d.sick); setV('Q', d.doc); setV('R', d.missing);
     if (hasOther) setV('S', d.other);
     if (hasNotes && d.notes.length) ws.getCell(`T${r0}`).value = d.notes.join('; ');
@@ -107,33 +109,43 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
   const withHol = comp.days.some(d => d.holiday && !d.weekend && d.netto);
   let s = last + 4;
   set(`A${s}`, 'SOUHRN', { bold: true, underline: true, color: RED_T, align: 'left' }); ws.getRow(s + 1).height = 7; s += 2;
-  const row = (label, minutes, o = {}) => {
+  const R = {}; // řádky souhrnu podle klíče
+  const row = (key, label, formula, minutes, o = {}) => {
     ws.mergeCells(`A${s}:D${s}`); ws.mergeCells(`E${s}:F${s}`);
     const col = o.red ? RED : undefined;
     set(`A${s}`, label, { align: 'left', wrap: true, color: col, fill: o.fill }).border = box;
-    set(`E${s}`, T(minutes || 0), { align: 'left', fmt: F_SUM, color: col, fill: o.fill }).border = box;
+    set(`E${s}`, { formula, result: T(minutes || 0) }, { align: 'left', fmt: F_SUM, color: col, fill: o.fill }).border = box;
     ws.getCell(`F${s}`).border = box;
-    if (o.dec && minutes) set(`G${s}`, hours(minutes), { align: 'right', fmt: F_NUM });
-    ws.getRow(s).height = 27; return s++;
+    if (o.dec && minutes) set(`G${s}`, hours(minutes), { align: 'right', fmt: F_NUM });   // desetinné hodiny (v předloze také jako číslo)
+    ws.getRow(s).height = 27; R[key] = s; return s++;
   };
-  row('Fond pracovní doby celkem:', S.fund);
-  row('Čas v práci celkem:', S.work);
-  row('Celkem odpracováno hodin včetně přesčasů:', S.netto, { fill: GREEN });
-  row('Odpracováno v pracovní dny včetně přesčasů celkem:', S.netto - S.nettoWeekend);
-  row(withHol ? 'Odpracováno o víkendu a ve svátek celkem:' : 'Odpracováno o víkendu celkem:', S.nettoWeekend);
+  // čísla řádků dopředu (vzorce se odkazují i na řádky pod sebou)
+  const S0 = s, A0 = s + 9;
+  const k = { fond: S0, prace: S0 + 1, all: S0 + 2, wd: S0 + 3, wk: S0 + 4, worked: A0, total: A0 + 1, over: A0 + 2, overWd: A0 + 3, overWk: A0 + 4, vac: A0 + 5, sick: A0 + 6, doc: A0 + 7, miss: A0 + 8 };
+  let nx = A0 + 9; if (hasOther) k.other = nx++; if (S.holiday) k.hol = nx++;
+  row('fond', 'Fond pracovní doby celkem:', `SUM(G10:G${last})`, S.fund);
+  row('prace', 'Čas v práci celkem:', `SUM(H10:H${last})`, S.work);
+  row('all', 'Celkem odpracováno hodin včetně přesčasů:', `SUM(I10:I${last})`, S.netto, { fill: GREEN });
+  row('wd', 'Odpracováno v pracovní dny včetně přesčasů celkem:', `E${k.all}-E${k.wk}`, S.netto - S.nettoWeekend);
+  row('wk', withHol ? 'Odpracováno o víkendu a ve svátek celkem:' : 'Odpracováno o víkendu celkem:', wkI.length ? wkI.join('+') : `E${k.all}-E${k.all}`, S.nettoWeekend);
   ws.getRow(s).height = 20; ws.getRow(s + 1).height = 20; ws.getRow(s + 2).height = 20; s += 2;
   set(`A${s}`, 'SOUHRN PRO ÚČETNÍ', { bold: true, underline: true, color: BLUE_T }); ws.getRow(s + 1).height = 7; s += 2;
-  row('Odpracováno:', S.worked, { dec: true, fill: GREY });
-  row('Odpracováno včetně svátků a přesčasů:', S.workedTotal, { dec: true, fill: GREY });
-  row('Přesčas celkem:', S.over, { dec: true, fill: LAV });
-  row('Přesčas v pracovní dny:', S.overWorkdays, { dec: true });
-  row(withHol ? 'Přesčas o víkendu a ve svátek:' : 'Přesčas o víkendu:', S.overWeekend, { dec: true });
-  row('Dovolená:', S.vac, { dec: true, fill: BLUE });
-  row('Nemoc:', S.sick, { dec: true, fill: YELLOW });
-  row('Návštěva lékaře:', S.doc, { dec: true });
-  row('Chybějící odpracovaný čas:', S.missing, { dec: true, red: true });
-  if (hasOther) row('Jiná placená překážka:', S.other, { dec: true });
-  if (S.holiday) row('Státní svátky (placené):', S.holiday, { dec: true, fill: HOL });
+  const minus = ['vac', 'sick', 'doc', 'miss', 'other', 'hol'].filter(x => k[x]).map(x => `-E${k[x]}`).join('');
+  row('worked', 'Odpracováno:', `E${k.fond}${minus}`, S.worked, { dec: true, fill: GREY });
+  row('total', 'Odpracováno včetně svátků a přesčasů:', `E${k.worked}+E${k.over}${k.hol ? `+E${k.hol}` : ''}`, S.workedTotal, { dec: true, fill: GREY });
+  row('over', 'Přesčas celkem:', `SUM(N10:N${last})`, S.over, { dec: true, fill: LAV });
+  row('overWd', 'Přesčas v pracovní dny:', `E${k.over}-E${k.overWk}`, S.overWorkdays, { dec: true });
+  row('overWk', withHol ? 'Přesčas o víkendu a ve svátek:' : 'Přesčas o víkendu:', `E${k.wk}`, S.overWeekend, { dec: true });
+  row('vac', 'Dovolená:', `SUM(O10:O${last})`, S.vac, { dec: true, fill: BLUE });
+  row('sick', 'Nemoc:', `SUM(P10:P${last})`, S.sick, { dec: true, fill: YELLOW });
+  row('doc', 'Návštěva lékaře:', `SUM(Q10:Q${last})`, S.doc, { dec: true });
+  row('miss', 'Chybějící odpracovaný čas:', `SUM(R10:R${last})`, S.missing, { dec: true, red: true });
+  if (hasOther) row('other', 'Jiná placená překážka:', `SUM(S10:S${last})`, S.other, { dec: true });
+  if (S.holiday) row('hol', 'Státní svátky (placené):', holG.join('+'), S.holiday, { dec: true, fill: HOL });
+  for (const [key, rr] of Object.entries(k)) if (R[key] !== rr) throw new Error(`Souhrn: nesedí řádek ${key}`);
+  // Odprac. prac. dnů = odpracováno (desetinné hodiny) / denní fond — jako v předloze
+  const daily = Number(emp.daily_hours) || 8;
+  ws.getCell('R5').value = S.worked ? { formula: `G${k.worked}/${String(daily)}`, result: S.workedDays } : 0;
   ws.views = [{ state: 'frozen', ySplit: 9 }];
   return ws;
 }
@@ -141,6 +153,7 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
 export async function downloadWorkbook(fileName, build) {
   const ExcelJS = await loadExcelJS();
   const wb = new ExcelJS.Workbook(); wb.creator = 'SmartJoi · DocházkoBot'; wb.created = new Date();
+  wb.calcProperties.fullCalcOnLoad = true;
   build(wb);
   const buf = await wb.xlsx.writeBuffer();
   const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
