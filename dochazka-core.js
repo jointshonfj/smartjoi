@@ -24,13 +24,17 @@ const pad = n => String(n).padStart(2, '0');
 export const ymd = (y, m, d) => `${y}-${pad(m)}-${pad(d)}`;
 // pondělí týdne, do kterého datum patří (klíč pro střídání směn)
 export const weekOf = date => { const d = new Date(date + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7); return d.toISOString().slice(0, 10); };
-// týdny, kdy měl zaměstnanec druhou (pozdní) směnu — pozná se podle příchodů: většina pracovních dnů v týdnu
-// začíná nejdřív 20 min před začátkem druhé směny
+// týdny, kdy měl zaměstnanec druhou (pozdní) směnu — pozná se z docházky: ve většině pracovních dnů týdne
+// přišel nejdřív 20 min před začátkem pozdní směny, nebo odešel nejdřív 15 min před jejím koncem
 export function detectAltWeeks(entries, empIn = {}) {
-  const alt = toMin(empIn.alt_shift_start); if (alt == null) return [];
-  const first = {};
-  for (const e of entries || []) { if (e.kind !== 'work' || toMin(e.start) == null) continue; const dow = new Date(e.date + 'T12:00:00Z').getUTCDay(); if (dow === 0 || dow === 6) continue; first[e.date] = Math.min(first[e.date] ?? 1e9, toMin(e.start)); }
-  const W = {}; for (const [date, m] of Object.entries(first)) { const w = (W[weekOf(date)] ||= { n: 0, late: 0 }); w.n++; if (m >= alt - 20) w.late++; }
+  const alt = toMin(empIn.alt_shift_start), altEnd = toMin(empIn.alt_shift_end); if (alt == null || altEnd == null) return [];
+  const D = {};
+  for (const e of entries || []) {
+    if (e.kind !== 'work' || toMin(e.start) == null || toMin(e.end) == null) continue;
+    const dow = new Date(e.date + 'T12:00:00Z').getUTCDay(); if (dow === 0 || dow === 6) continue;
+    const x = (D[e.date] ||= { s: 1e9, e: 0 }); x.s = Math.min(x.s, toMin(e.start)); x.e = Math.max(x.e, toMin(e.end));
+  }
+  const W = {}; for (const [date, x] of Object.entries(D)) { const w = (W[weekOf(date)] ||= { n: 0, late: 0 }); w.n++; if (x.s >= alt - 20 || x.e >= altEnd - 15) w.late++; }
   return Object.entries(W).filter(([, w]) => w.late * 2 > w.n).map(([k]) => k).sort();
 }
 
