@@ -14,7 +14,7 @@ const COUNTRIES = [
 ];
 const MAP_LABELS = {
   orderCode: 'Číslo objednávky', status: 'Stav objednávky', itemCode: 'Kód položky', itemName: 'Název položky', itemVariant: 'Varianta',
-  itemAmount: 'Množství', itemUnit: 'Jednotka', itemType: 'Typ položky (doprava/platba se přeskočí)', date: 'Datum', customer: 'Zákazník',
+  itemAmount: 'Množství', itemUnit: 'Jednotka', itemType: 'Typ položky (doprava/platba se přeskočí)', date: 'Datum',
 };
 const TABS = [
   ['objednavky', 'Objednávky'], ['aufy', 'AUFy'], ['svozy', 'Svozy'],
