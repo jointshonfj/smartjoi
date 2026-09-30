@@ -11,7 +11,7 @@ export function loadExcelJS() {
   });
 }
 const T = m => m == null ? null : m / 1440;             // minuty → Excel čas
-const F_TIME = 'h:mm;@', F_SUM = '[h]:mm', F_NUM = '#,##0.00';
+const F_TIME = 'h:mm;@', F_DUR = '[h]:mm;;', F_SUM = '[h]:mm', F_NUM = '#,##0.00';
 const LAV = 'FFE6D5F3', GREY = 'FFD9D9D9', HOL = 'FFFFF2CC';
 const thin = { style: 'thin' }, box = { top: thin, left: thin, bottom: thin, right: thin };
 
@@ -50,7 +50,7 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
   ws.getRow(8).height = 19; ws.getRow(9).height = 19;
 
   // dny
-  let r = 10; const weekendI = [];
+  let r = 10;
   const cols = 'ABCDEFGHIJKLMNOPQRST'.split('');
   for (const d of comp.days) {
     const n = Math.max(1, d.segs.length), r0 = r;
@@ -60,9 +60,12 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
       for (const c of cols) { const cell = ws.getCell(`${c}${r}`); font(cell, { bold: c === 'A' || c === 'B' }); cell.border = box; cell.alignment = { horizontal: c === 'A' || c === 'B' || c === 'T' ? 'left' : 'center', vertical: 'middle' }; if (fill) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } }; }
       const s = d.segs[i];
       if (s) { ws.getCell(`C${r}`).value = T(s.s); ws.getCell(`D${r}`).value = T(s.e); }
-      for (const c of 'CDEFGJKLMOPQRS') ws.getCell(`${c}${r}`).numFmt = F_TIME;
-      ws.getCell(`H${r}`).value = { formula: `D${r}-C${r}` }; ws.getCell(`H${r}`).numFmt = F_TIME;
-      ws.getCell(`I${r}`).value = { formula: `H${r}+(E${r}-F${r})` }; ws.getCell(`I${r}`).numFmt = F_TIME;
+      for (const c of 'CDEFJKLM') ws.getCell(`${c}${r}`).numFmt = F_TIME;
+      for (const c of 'GHINOPQRS') ws.getCell(`${c}${r}`).numFmt = F_DUR;
+      // hodnoty (ne vzorce) — spočítá je aplikace; vzorce s časy nefungovaly v Numbers a v náhledech
+      const len = s ? s.e - s.s : 0;
+      ws.getCell(`H${r}`).value = T(len);
+      ws.getCell(`I${r}`).value = T(Math.max(0, len - (i === 0 && d.lunch ? d.lunch.e - d.lunch.s : 0)));
     }
     const setV = (c, v) => { if (v) ws.getCell(`${c}${r0}`).value = T(v); };
     ws.getCell(`A${r0}`).value = new Date(Date.UTC(...d.date.split('-').map((x, i) => i === 1 ? +x - 1 : +x))); ws.getCell(`A${r0}`).numFmt = 'd.m.yyyy';
@@ -71,49 +74,42 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
     setV('G', d.fund);
     if (d.blocks[0]) { ws.getCell(`J${r0}`).value = T(d.blocks[0][0]); ws.getCell(`K${r0}`).value = T(d.blocks[0][1]); }
     if (d.blocks[1]) { ws.getCell(`L${r0}`).value = T(d.blocks[1][0]); ws.getCell(`M${r0}`).value = T(d.blocks[1][1]); }
-    ws.getCell(`N${r0}`).value = { formula: `(K${r0}-J${r0})+(M${r0}-L${r0})` }; ws.getCell(`N${r0}`).numFmt = F_TIME;
+    ws.getCell(`N${r0}`).value = T(d.over || 0);
     setV('O', d.vac); setV('P', d.sick); setV('Q', d.doc); setV('R', d.missing); setV('S', d.other);
     if (d.notes.length) ws.getCell(`T${r0}`).value = d.notes.join('; ');
     if (n > 1) for (const c of ['A', 'B', 'E', 'F', 'G', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T']) ws.mergeCells(`${c}${r0}:${c}${r - 1}`);
-    if ((d.weekend || d.holiday) && d.netto) for (let x = r0; x < r; x++) weekendI.push(`I${x}`);
   }
   const last = r - 1;
 
   // souhrn
   let s = last + 4;
   set(`A${s}`, 'SOUHRN', { bold: true }); s += 2;
-  const row = (label, formula, o = {}) => {
+  const row = (label, minutes, o = {}) => {
     ws.mergeCells(`A${s}:D${s}`); ws.mergeCells(`E${s}:F${s}`);
     const a = set(`A${s}`, label, { align: 'left', wrap: true }); a.border = box;
-    const e = ws.getCell(`E${s}`); e.value = typeof formula === 'number' ? formula : { formula }; e.numFmt = F_SUM; font(e, { size: 9 }); e.border = box; e.alignment = { horizontal: 'left', vertical: 'middle' };
+    const e = ws.getCell(`E${s}`); e.value = T(minutes || 0); e.numFmt = F_SUM; font(e, { size: 9 }); e.border = box; e.alignment = { horizontal: 'left', vertical: 'middle' };
     if (o.fill) for (const c of [a, e]) c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: o.fill } };
-    if (o.dec) { const g = ws.getCell(`G${s}`); g.value = { formula: `E${s}*24` }; g.numFmt = F_NUM; font(g, { size: 9 }); g.alignment = { horizontal: 'right', vertical: 'middle' }; }
+    if (o.dec) { const g = ws.getCell(`G${s}`); g.value = hours(minutes || 0); g.numFmt = F_NUM; font(g, { size: 9 }); g.alignment = { horizontal: 'right', vertical: 'middle' }; }
     ws.getRow(s).height = 27; return s++;
   };
-  const rFond = row('Fond pracovní doby celkem:', `SUM(G10:G${last})`);
-  row('Čas v práci celkem:', `SUM(H10:H${last})`);
-  const rAll = row('Celkem odpracováno hodin včetně přesčasů:', `SUM(I10:I${last})`);
-  const rWk = s + 1;
-  row('Odpracováno v pracovní dny včetně přesčasů celkem:', `E${rAll}-E${rWk}`);
-  row('Odpracováno o víkendu a ve svátek celkem:', weekendI.length ? weekendI.join('+') : '0');
+  row('Fond pracovní doby celkem:', S.fund);
+  row('Čas v práci celkem:', S.work);
+  row('Celkem odpracováno hodin včetně přesčasů:', S.netto);
+  row('Odpracováno v pracovní dny včetně přesčasů celkem:', S.netto - S.nettoWeekend);
+  row('Odpracováno o víkendu a ve svátek celkem:', S.nettoWeekend);
   s += 2; set(`A${s}`, 'SOUHRN PRO ÚČETNÍ', { bold: true }); s += 2;
-  const rWorked = s, rWithOver = s + 1, rOver = s + 2, rOverWd = s + 3, rOverWe = s + 4, rVac = s + 5, rSick = s + 6, rDoc = s + 7, rMiss = s + 8, rOther = s + 9, rHol = s + 10;
-  row('Odpracováno:', `E${rFond}-E${rVac}-E${rSick}-E${rDoc}-E${rMiss}-E${rOther}-E${rHol}`, { dec: true });
-  row('Odpracováno včetně svátků a přesčasů:', `E${rWorked}+E${rHol}+E${rOver}`, { dec: true });
-  row('Přesčas celkem:', `SUM(N10:N${last})`, { dec: true, fill: LAV });
-  row('Přesčas v pracovní dny:', `E${rOver}-E${rOverWe}`, { dec: true });
-  row('Přesčas o víkendu a ve svátek:', `E${rWk}`, { dec: true });
-  row('Dovolená:', `SUM(O10:O${last})`, { dec: true });
-  row('Nemoc:', `SUM(P10:P${last})`, { dec: true });
-  row('Návštěva lékaře:', `SUM(Q10:Q${last})`, { dec: true });
-  row('Chybějící odpracovaný čas:', `SUM(R10:R${last})`, { dec: true });
-  row('Jiná placená překážka:', `SUM(S10:S${last})`, { dec: true });
-  row('Státní svátky (placené):', T(S.holiday), { dec: true });
-  const r5 = ws.getCell('R5'); r5.value = { formula: `G${rWorked}/${Number(emp.daily_hours) || 8}` }; r5.numFmt = F_NUM; font(r5, { size: 9, bold: true }); r5.alignment = { horizontal: 'left' };
-  // spočítané hodnoty jako výsledky vzorců (kvůli náhledům bez přepočtu)
-  const pre = { [rWorked]: S.worked, [rWithOver]: S.workedTotal, [rOver]: S.over, [rOverWd]: S.overWorkdays, [rOverWe]: S.overWeekend, [rVac]: S.vac, [rSick]: S.sick, [rDoc]: S.doc, [rMiss]: S.missing, [rOther]: S.other };
-  for (const [k, v] of Object.entries(pre)) { const g = ws.getCell(`G${k}`); g.value = { formula: g.value.formula, result: hours(v) }; const e = ws.getCell(`E${k}`); if (e.value?.formula) e.value = { formula: e.value.formula, result: v / 1440 }; }
-  r5.value = { formula: r5.value.formula, result: S.workedDays };
+  row('Odpracováno:', S.worked, { dec: true });
+  row('Odpracováno včetně svátků a přesčasů:', S.workedTotal, { dec: true });
+  row('Přesčas celkem:', S.over, { dec: true, fill: LAV });
+  row('Přesčas v pracovní dny:', S.overWorkdays, { dec: true });
+  row('Přesčas o víkendu a ve svátek:', S.overWeekend, { dec: true });
+  row('Dovolená:', S.vac, { dec: true });
+  row('Nemoc:', S.sick, { dec: true });
+  row('Návštěva lékaře:', S.doc, { dec: true });
+  row('Chybějící odpracovaný čas:', S.missing, { dec: true });
+  row('Jiná placená překážka:', S.other, { dec: true });
+  row('Státní svátky (placené):', S.holiday, { dec: true });
+  const r5 = ws.getCell('R5'); r5.value = S.workedDays; r5.numFmt = F_NUM; font(r5, { size: 9, bold: true }); r5.alignment = { horizontal: 'left' };
   ws.views = [{ state: 'frozen', ySplit: 9 }];
   return ws;
 }
