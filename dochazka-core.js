@@ -24,18 +24,14 @@ const pad = n => String(n).padStart(2, '0');
 export const ymd = (y, m, d) => `${y}-${pad(m)}-${pad(d)}`;
 // pondělí týdne, do kterého datum patří (klíč pro střídání směn)
 export const weekOf = date => { const d = new Date(date + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7); return d.toISOString().slice(0, 10); };
-// týdny, kdy měl zaměstnanec druhou (pozdní) směnu — pozná se z docházky: ve většině pracovních dnů týdne
-// přišel nejdřív 20 min před začátkem pozdní směny, nebo odešel nejdřív 15 min před jejím koncem
-export function detectAltWeeks(entries, empIn = {}) {
-  const alt = toMin(empIn.alt_shift_start), altEnd = toMin(empIn.alt_shift_end); if (alt == null || altEnd == null) return [];
-  const D = {};
-  for (const e of entries || []) {
-    if (e.kind !== 'work' || toMin(e.start) == null || toMin(e.end) == null) continue;
-    const dow = new Date(e.date + 'T12:00:00Z').getUTCDay(); if (dow === 0 || dow === 6) continue;
-    const x = (D[e.date] ||= { s: 1e9, e: 0 }); x.s = Math.min(x.s, toMin(e.start)); x.e = Math.max(x.e, toMin(e.end));
-  }
-  const W = {}; for (const [date, x] of Object.entries(D)) { const w = (W[weekOf(date)] ||= { n: 0, late: 0 }); w.n++; if (x.s >= alt - 20 || x.e >= altEnd - 15) w.late++; }
-  return Object.entries(W).filter(([, w]) => w.late * 2 > w.n).map(([k]) => k).sort();
+// Střídavá (delší) směna, např. kancelář 8:30–17:00 místo 7:30–16:00 — prohazují si ji i po dnech.
+// Den je „delší směna“, když zaměstnanec odešel nejdřív 15 min před jejím koncem (typicky v 17:00),
+// nebo přišel nejdřív 20 min před jejím začátkem. Ručně jde den přepnout (shiftDays[date] = 'alt' | 'normal').
+export function autoAltDay(list, empIn = {}) {
+  const alt = toMin(empIn.alt_shift_start), altEnd = toMin(empIn.alt_shift_end); if (alt == null || altEnd == null) return false;
+  const work = (list || []).filter(e => e.kind === 'work' && toMin(e.start) != null && toMin(e.end) != null); if (!work.length) return false;
+  const first = Math.min(...work.map(e => toMin(e.start))), last = Math.max(...work.map(e => toMin(e.end)));
+  return last >= altEnd - 15 || first >= alt - 20;
 }
 
 // ---------- státní svátky ČR ----------
@@ -100,7 +96,7 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
   const [Y, M] = month.split('-').map(Number);
   const nDays = new Date(Date.UTC(Y, M, 0)).getUTCDate();
   const hol = czHolidays(Y);
-  const altWeeks = new Set(toMin(emp.alt_shift_start) != null && toMin(emp.alt_shift_end) != null ? opts.altWeeks || [] : []);
+  const hasAlt = toMin(emp.alt_shift_start) != null && toMin(emp.alt_shift_end) != null, shiftDays = opts.shiftDays || {};
   const dayFund = Math.round(Number(emp.daily_hours) * 60);
   const byDate = {}; for (const e of entries || []) (byDate[e.date] ||= []).push(e);
   const days = [];
@@ -109,7 +105,8 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
     const weekend = dow === 0 || dow === 6, holiday = hol[date] || null;
     const list = byDate[date] || [];
     const notes = [];
-    const alt = !weekend && altWeeks.has(weekOf(date));
+    const alt = !weekend && hasAlt && (shiftDays[date] === 'alt' || (shiftDays[date] !== 'normal' && autoAltDay(list, emp)));
+    const altManual = !weekend && hasAlt && !!shiftDays[date];
     const shiftStart = toMin(alt ? emp.alt_shift_start : emp.shift_start), shiftEnd = toMin(alt ? emp.alt_shift_end : emp.shift_end);
     // pracovní úseky (vnitřní hranice se nezaokrouhlují, jen příchod a odchod)
     const work = list.filter(e => e.kind === 'work' && toMin(e.start) != null && toMin(e.end) != null)
@@ -167,7 +164,7 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
         const rest = over - morning; if (rest > 0) blocks.push([last - rest, last]);
       }
     }
-    days.push({ date, day: d, dow, dayName: DAY_NAMES[dow], weekend, holiday, alt, shift: [shiftStart, shiftEnd], segs, lunch, workMin, netto, fund, vac, sick, doc, other, over, blocks, missing, holidayMin, notes, entries: list });
+    days.push({ date, day: d, dow, dayName: DAY_NAMES[dow], weekend, holiday, alt, altManual, shift: [shiftStart, shiftEnd], segs, lunch, workMin, netto, fund, vac, sick, doc, other, over, blocks, missing, holidayMin, notes, entries: list });
   }
   const sum = k => days.reduce((t, x) => t + (x[k] || 0), 0);
   const weekendDays = days.filter(x => x.weekend || x.holiday);
@@ -182,5 +179,5 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
   S.worked = S.fund - S.vac - S.sick - S.doc - S.other - S.missing - S.holiday;   // „Odpracováno“ (pro účetní)
   S.workedTotal = S.worked + S.holiday + S.over;                                   // „včetně svátků a přesčasů“
   S.workedDays = Math.round((S.worked / (Number(emp.daily_hours) * 60)) * 100) / 100;
-  return { month, emp, days, sum: S, altWeeks: [...altWeeks] };
+  return { month, emp, days, sum: S };
 }
