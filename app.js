@@ -1,8 +1,8 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20260930h';
-import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20260930h';
+import * as DC from './dochazka-core.js?v=20261001a';
+import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261001a';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -601,10 +601,11 @@ function editAttEmployee(id) {
     ['weekly_hours', 'Týdenní pracovní doba (h)', 'num'], ['daily_hours', 'Denní fond (h)', 'num'], ['shift_start', 'Začátek směny', 'time'], ['shift_end', 'Konec směny', 'time'],
     ['alt_shift_start', 'Střídavá směna od (nepovinné)', 'time'], ['alt_shift_end', 'Střídavá směna do', 'time'],
     ['lunch_minutes', 'Oběd (min)', 'num'], ['lunch_after_minutes', 'Oběd, když práce déle než (min)', 'num'], ['lunch_default', 'Oběd od', 'time'],
-    ['round_start', 'Příchod zaokrouhlit nahoru na (min)', 'num'], ['round_end', 'Odchod zaokrouhlit dolů na (min)', 'num'], ['end_tolerance', 'Odchod do X min po konci směny = konec směny', 'num']];
+    ['round_start', 'Příchod zaokrouhlit na (min)', 'num'], ['round_end', 'Odchod zaokrouhlit na (min)', 'num'], ['end_tolerance', 'Odchod do X min po konci směny = konec směny', 'num']];
   $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:720px">
     <div class="modal-head"><h2>Nastavení · ${esc(e.name)}</h2><button class="icon-btn" data-close>✕</button></div>
     <div class="grid-2">${F.map(([k, l, t]) => `<label class="field"><span>${l}</span><input type="${t === 'time' ? 'time' : 'text'}" ${t === 'num' ? 'inputmode="decimal"' : ''} data-ae="${k}" data-t="${t}" value="${esc(String(e[k] ?? '').replace('.', t === 'num' ? ',' : '.'))}"></label>`).join('')}</div>
+    <div class="grid-2" style="margin-top:10px">${[['round_start_mode', 'Příchod zaokrouhlovat'], ['round_end_mode', 'Odchod zaokrouhlovat']].map(([k, l]) => `<label class="field"><span>${l}</span><select data-ae="${k}" data-t="text">${[['down', 'dolů (7:31 → 7:30)'], ['nearest', 'na nejbližší (7:38 → 7:45)'], ['up', 'nahoru (7:31 → 7:45)']].map(([v, t]) => `<option value="${v}" ${(e[k] || (k === 'round_start_mode' ? 'nearest' : 'down')) === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>`).join('')}</div>
     <label class="chip" style="margin-top:10px"><input type="checkbox" id="ae-active" ${e.active ? 'checked' : ''}> Zobrazovat v DocházkoBotu (odškrtnout = zpracovává se zvlášť)</label>
     <label class="field" style="margin-top:10px"><span>Poznámka / zvláštnosti (čte i SmartJoiAI)</span><textarea data-ae="notes" data-t="text" style="min-height:60px">${esc(e.notes)}</textarea></label>
     <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="ae-save">Uložit</button></div>
