@@ -1,8 +1,8 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261001a';
-import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261001a';
+import * as DC from './dochazka-core.js?v=20261001b';
+import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261001b';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -422,7 +422,8 @@ function attEmployeeView(emp, month) {
         <b>${c ? 'Nahrát znovu' : 'Nahrát docházku'} · ${esc(monthLabel(month))}</b>
         <span class="small muted">PDF z docházkového systému (seznam záznamů „Úprava záznamů“ a/nebo měsíční výkaz) — přetáhni sem nebo klikni</span></label>
       <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap"><button class="btn sm ghost" id="att-paste">Vložit jako text</button>
-        ${r?.sources?.length ? `<span class="small muted">Podklady: ${r.sources.map(s => esc(s.name)).join(', ')} · ${fmtDate(r.updatedAt)}</span>` : ''}
+        ${r?.sources?.length ? `<span class="att-srcs">${r.sources.map((s, i) => `<span class="chip att-src" title="Nahráno ${esc(fmtDate(s.at || r.updatedAt))}${s.n ? ` · ${s.n} záznamů` : ''}${s.report ? ' · měsíční výkaz' : ''}${s.ai ? ' · přečetl SmartJoiAI' : ''}">📄 ${esc(s.name)}${s.n ? ` <span class="muted">(${s.n})</span>` : s.report ? ' <span class="muted">(výkaz)</span>' : ''}<button class="icon-btn" data-srcdel="${i}" title="Smazat tento podklad i jeho záznamy">✕</button></span>`).join('')}</span>` : ''}
+        ${r ? `<button class="btn sm ghost" id="att-wipe" title="Smaže všechny záznamy, podklady a úpravy za tento měsíc">🗑 Smazat měsíc</button>` : ''}
         ${c && rep ? `<span class="grow"></span>${chk('fond', c.sum.fund / 60, rep.fund)}${chk('dovolená', c.sum.vac / 60, rep.vacation)}${chk('lékař', c.sum.doc / 60, rep.doctor)}` : ''}</div>
     </div>`;
   if (!c) return h + `<div class="card empty"><div class="big">🕘</div><b>Za ${esc(monthLabel(month))} zatím žádná docházka.</b><div class="small">Nahraj PDF z docházkového systému. Víc souborů najednou je v pořádku (záznamy + měsíční výkaz pro kontrolu).</div></div>`;
@@ -484,6 +485,12 @@ function bindAtt(emp, month) {
     $('#att-text-go').onclick = () => { const t = $('#att-text').value; closeModal(); attImportTexts(emp, month, [{ name: 'vložený text', text: t }]); };
   };
   V.querySelectorAll('tr[data-aday]').forEach(tr => tr.onclick = () => editAttDay(emp, month, tr.dataset.aday));
+  V.querySelectorAll('[data-srcdel]').forEach(b => b.onclick = ev => { ev.preventDefault(); ev.stopPropagation(); attDeleteSource(emp, month, +b.dataset.srcdel); });
+  if ($('#att-wipe')) $('#att-wipe').onclick = () => {
+    const r = attRec(emp.id, month);
+    if (!confirm(`Smazat celou docházku ${emp.name} za ${monthLabel(month)}? Smažou se všechny nahrané podklady, záznamy i ruční úpravy. Pak můžeš nahrát nové soubory.`)) return;
+    act(async () => ok(await sb.from('att_months').delete().eq('id', r.id)), 'Docházka za měsíc smazána');
+  };
 }
 
 // --- import podkladů
@@ -502,17 +509,19 @@ const b64 = buf => { let s = ''; const b = new Uint8Array(buf); for (let i = 0; 
 async function attImportTexts(emp, month, texts) {
   let entries = [], report = null, names = new Set(), aiUsed = false;
   for (const t of texts) {
+    t.id = Math.random().toString(36).slice(2, 10);   // každý podklad má své id → jde později smazat i se svými záznamy
     const p = DC.parseAttendanceText(t.text);
     if (p.employee) names.add(p.employee);
-    if (p.report) report = p.report;
-    if (p.entries.length) { entries.push(...p.entries); continue; }
+    if (p.report) { report = p.report; t.report = true; }
+    if (p.entries.length) { entries.push(...p.entries.map(e => ({ ...e, src: t.id }))); continue; }
     if (p.report) continue; // měsíční výkaz — jen pro kontrolu
     // neznámý formát → SmartJoiAI
     try {
       toast('Neznámý formát — čte ho SmartJoiAI…'); aiUsed = true;
       const j = await callAssistant({ task: 'extract_attendance', employee: emp.name, month, text: t.text.slice(0, 60000), pdf: t.pdf ? b64(t.pdf) : undefined });
       if (j.employee) names.add(j.employee);
-      entries.push(...(j.entries || []).map(e => ({ ...e, exact: false, label: e.label || DC.KIND_LABEL[e.kind] || '' })));
+      entries.push(...(j.entries || []).map(e => ({ ...e, exact: false, label: e.label || DC.KIND_LABEL[e.kind] || '', src: t.id })));
+      t.ai = true;
     } catch (e) { toast('SmartJoiAI soubor nepřečetl: ' + e.message); }
   }
   if (!entries.length && !report) return toast('V podkladech jsem nenašel žádné záznamy docházky.');
@@ -529,11 +538,33 @@ async function attImportTexts(emp, month, texts) {
   const mine = entries.filter(e => e.date.startsWith(target));
   const ex = attRec(emp.id, target);
   if (mine.length && ex?.entries?.length && !confirm(`${emp.name} už má za ${monthLabel(target)} nahranou docházku (${ex.entries.length} záznamů). Nahradit ji novými podklady?`)) return;
-  const sources = [...(mine.length ? [] : ex?.sources || []), ...texts.map(t => ({ name: t.name, at: new Date().toISOString(), ai: aiUsed || undefined }))];
+  const now = new Date().toISOString();
+  const newSrc = texts.map(t => ({ id: t.id, name: t.name, at: now, n: mine.filter(e => e.src === t.id).length, report: t.report || undefined, ai: t.ai || undefined }))
+    .filter(x => x.n || x.report);
+  // při nahrazení záznamů zůstane jen dřívější měsíční výkaz (pokud nepřišel nový)
+  const keep = (ex?.sources || []).filter(x => mine.length ? (x.report && !x.n && !report) : true);
+  const sources = [...keep, ...newSrc];
   const row = { employee_id: emp.id, month: target, sources, updated_at: new Date().toISOString(), ...(mine.length ? { entries: mine, status: 'draft', shift_days: {} } : {}), ...(report ? { report } : {}) };
   ui.attMonth = target;
   await act(async () => ok(await sb.from('att_months').upsert(row, { onConflict: 'employee_id,month' })),
     mine.length ? `Načteno ${plural(mine.length, 'záznam', 'záznamy', 'záznamů')}${aiUsed ? ' (přečetl SmartJoiAI — zkontroluj)' : ''} ✓` : 'Uložen měsíční výkaz pro kontrolu ✓');
+}
+// smazání jednoho nahraného podkladu i se záznamy, které z něj vznikly
+async function attDeleteSource(emp, month, idx) {
+  const r = attRec(emp.id, month); const src = r?.sources?.[idx]; if (!src) return;
+  const legacy = !src.id;   // starší nahrávky (před 1. 10. 2026) nemají u záznamů vazbu na soubor
+  let others = r.sources.filter((_, i) => i !== idx);
+  const drop = e => src.kind === 'manual' ? e.edited : legacy ? !e.src && !e.edited : e.src === src.id;
+  const entries = r.entries.filter(e => !drop(e));
+  if (!entries.some(e => e.edited)) for (let i = others.length - 1; i >= 0; i--) if (others[i].kind === 'manual') others.splice(i, 1);
+  const removed = r.entries.length - entries.length;
+  const dropReport = src.report || (legacy && !others.some(x => !x.id || x.report));
+  const report = dropReport ? null : r.report;
+  if (!confirm(`Smazat podklad „${src.name}“${removed ? ` a ${plural(removed, 'záznam', 'záznamy', 'záznamů')}, které z něj vznikly` : ''}${dropReport && r.report ? ' (i kontrolní měsíční výkaz)' : ''}?${legacy ? '\n\nStarší nahrávka — smažou se všechny nahrané záznamy kromě ručních úprav.' : ''}`)) return;
+  await act(async () => {
+    if (!entries.length && !report && !others.length) ok(await sb.from('att_months').delete().eq('id', r.id));
+    else ok(await sb.from('att_months').update({ sources: others, entries, report, updated_at: new Date().toISOString(), ...(entries.length ? {} : { status: 'draft', shift_days: {} }) }).eq('id', r.id));
+  }, 'Podklad smazán');
 }
 async function callAssistant(payload) {
   const { data: { session: s } } = await sb.auth.getSession();
@@ -592,7 +623,7 @@ function editAttDay(emp, month, date) {
     const all = [...(rec?.entries || []).filter(e => e.date !== date), ...list.map(e => ({ ...e, edited: true }))].sort((a, b) => (a.date + (a.start || '')).localeCompare(b.date + (b.start || '')));
     const sd = { ...(rec?.shiftDays || {}) }; const sv = $('#ad-shift')?.value; if (sv) sd[date] = sv; else delete sd[date];
     closeModal();
-    await act(async () => ok(await sb.from('att_months').upsert({ employee_id: emp.id, month, entries: all, shift_days: sd, updated_at: new Date().toISOString(), ...(rec ? {} : { sources: [{ name: 'ručně', at: new Date().toISOString() }] }) }, { onConflict: 'employee_id,month' })), 'Den uložen ✓');
+    await act(async () => ok(await sb.from('att_months').upsert({ employee_id: emp.id, month, entries: all, shift_days: sd, updated_at: new Date().toISOString(), ...(rec ? (rec.sources || []).some(x => x.kind === 'manual') ? {} : { sources: [...(rec.sources || []), { id: 'manual', kind: 'manual', name: 'ruční úpravy', at: new Date().toISOString() }] } : { sources: [{ id: 'manual', kind: 'manual', name: 'ruční úpravy', at: new Date().toISOString() }] }) }, { onConflict: 'employee_id,month' })), 'Den uložen ✓');
   };
 }
 function editAttEmployee(id) {
