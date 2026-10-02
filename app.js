@@ -1,8 +1,8 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261001b';
-import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261001b';
+import * as DC from './dochazka-core.js?v=20261002a';
+import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261002a';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -349,7 +349,10 @@ const prevMonth = () => { const d = new Date(); d.setDate(1); d.setMonth(d.getMo
 const monthLabel = m => { const [y, mo] = m.split('-').map(Number); return new Date(y, mo - 1, 1).toLocaleDateString('cs-CZ', { month: 'long', year: 'numeric' }); };
 const attEmp = id => S.att.employees.find(e => e.id === id);
 const attRec = (empId, month) => S.att.months.find(r => r.employeeId === empId && r.month === month);
-const attComp = (emp, month) => { const r = attRec(emp.id, month); return r && r.entries.length ? DC.computeMonth(month, r.entries, emp, { shiftDays: r.shiftDays }) : null; };
+// zaměstnanec s automatickou docházkou (např. 1 h denně): bez nahraného záznamu se měsíc vyplní sám
+const AUTO_SRC = { id: 'auto', kind: 'auto', name: 'automaticky', at: null };
+const attEntries = (emp, month) => { const r = attRec(emp.id, month); return r?.entries?.length ? r.entries : DC.hasAuto(emp) ? DC.autoEntries(month, emp) : []; };
+const attComp = (emp, month) => { const r = attRec(emp.id, month), list = attEntries(emp, month); return list.length ? DC.computeMonth(month, list, emp, { shiftDays: r?.shiftDays }) : null; };
 const hasAlt = e => !!(e.alt_shift_start && e.alt_shift_end);
 const shiftText = e => `směna ${e.shift_start}–${e.shift_end}${hasAlt(e) ? ` (střídá s ${e.alt_shift_start}–${e.alt_shift_end})` : ''}`;
 const hh = m => DC.hours(m || 0).toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -361,7 +364,7 @@ function renderAttApp(empId) {
   ui.attMonth ||= prevMonth();
   const month = ui.attMonth, emps = S.att.employees.filter(e => e.active);
   const emp = empId ? attEmp(empId) : null;
-  const statusDot = e => { const r = attRec(e.id, month); return !r || !r.entries.length ? '' : r.status === 'done' ? ' <span class="att-dot done" title="Hotovo">✓</span>' : ' <span class="att-dot" title="Nahráno">•</span>'; };
+  const statusDot = e => { const r = attRec(e.id, month); return !r || !r.entries.length ? (DC.hasAuto(e) ? ' <span class="att-dot" title="Automaticky">⚡</span>' : '') : r.status === 'done' ? ' <span class="att-dot done" title="Hotovo">✓</span>' : ' <span class="att-dot" title="Nahráno">•</span>'; };
   let h = `
     <div class="page-head">
       <div><div class="eyebrow">Aplikace 04 · Docházka a podklady pro účetní</div><h1>DocházkoBot</h1></div>
@@ -390,7 +393,7 @@ function attOverview(emps, month) {
       <thead><tr><th>Zaměstnanec</th><th class="hide-m">Oddělení</th><th>Stav</th><th class="num">Odpracováno</th><th class="num">Přesčas</th><th class="num hide-m">Dovolená</th><th class="num hide-m">Nemoc</th><th class="num hide-m">Lékař</th><th class="num">Chybí</th></tr></thead>
       <tbody>${rows.map(({ e, r, c }) => `<tr data-aemp="${e.id}">
         <td><b>${esc(e.name)}</b></td><td class="hide-m small">${esc(e.department || '—')}</td>
-        <td>${!c ? '<span class="badge">nenahráno</span>' : r.status === 'done' ? '<span class="badge ok">hotovo</span>' : '<span class="badge info">rozpracováno</span>'}</td>
+        <td>${!c ? '<span class="badge">nenahráno</span>' : r?.status === 'done' ? '<span class="badge ok">hotovo</span>' : !r ? '<span class="badge info">⚡ automaticky</span>' : '<span class="badge info">rozpracováno</span>'}</td>
         ${c ? `<td class="num">${hh(c.sum.worked)}</td><td class="num">${hh(c.sum.over)}</td><td class="num hide-m">${hh(c.sum.vac)}</td><td class="num hide-m">${hh(c.sum.sick)}</td><td class="num hide-m">${hh(c.sum.doc)}</td><td class="num ${c.sum.missing ? 'neg' : ''}">${hh(c.sum.missing)}</td>` : '<td colspan="6" class="muted small">—</td>'}
       </tr>`).join('')}</tbody></table></div></div>
     ${(() => { const hid = S.att.employees.filter(e => !e.active); return hid.length ? `<div class="small muted" style="margin:-4px 2px 14px">Skrytí (zpracovávají se zvlášť): ${hid.map(e => `${esc(e.name)} <button class="btn sm ghost" data-ashow="${e.id}" style="padding:2px 8px">zobrazit</button>`).join(' · ')}</div>` : ''; })()}
@@ -414,7 +417,7 @@ function attEmployeeView(emp, month) {
       <div class="row">
         <button class="btn sm ghost" id="att-set">⚙ Nastavení</button>
         <button class="btn sm ghost" id="att-ai">✦ Zeptat se SmartJoiAI</button>
-        ${c ? `<button class="btn sm ${r.status === 'done' ? 'ghost' : ''}" id="att-done">${r.status === 'done' ? '↩ Vrátit do rozpracovaných' : '✓ Hotovo'}</button><button class="btn sm primary" id="att-xlsx">⬇ Excel pro účetní</button>` : ''}
+        ${c ? `<button class="btn sm ${r?.status === 'done' ? 'ghost' : ''}" id="att-done">${r?.status === 'done' ? '↩ Vrátit do rozpracovaných' : '✓ Hotovo'}</button><button class="btn sm primary" id="att-xlsx">⬇ Excel pro účetní</button>` : ''}
       </div>
     </div>
     <div class="card">
@@ -428,6 +431,7 @@ function attEmployeeView(emp, month) {
     </div>`;
   if (!c) return h + `<div class="card empty"><div class="big">🕘</div><b>Za ${esc(monthLabel(month))} zatím žádná docházka.</b><div class="small">Nahraj PDF z docházkového systému. Víc souborů najednou je v pořádku (záznamy + měsíční výkaz pro kontrolu).</div></div>`;
   const S2 = c.sum;
+  if (DC.hasAuto(emp)) h += `<div class="small muted" style="margin:-4px 2px 12px">⚡ Automatická docházka: každý pracovní den ${esc(emp.auto_start)}–${esc(emp.auto_end)} (${hh(DC.toMin(emp.auto_end) - DC.toMin(emp.auto_start))} h), víkendy a svátky ne. Dovolenou, nemoc nebo jiný čas zapíšeš kliknutím na den; čas a rozsah změníš v ⚙ Nastavení.</div>`;
   if (hasAlt(emp)) h += `<div class="small muted" style="margin:-4px 2px 12px">Směna se určuje po dnech: kdo skončil v ${esc(emp.alt_shift_end)}, měl delší směnu ${esc(emp.alt_shift_start)}–${esc(emp.alt_shift_end)} (vše před ${esc(emp.alt_shift_start)} je přesčas), jinak ${esc(emp.shift_start)}–${esc(emp.shift_end)}. Den s delší směnou má u data štítek ${esc(emp.alt_shift_start)}; ručně jde přepnout v úpravě dne.</div>`;
   h += `<div class="stats att-stats">
       <div class="stat"><div class="v">${hh(S2.worked)}</div><div class="l">odpracováno (h)</div></div>
@@ -467,7 +471,9 @@ function bindAtt(emp, month) {
   if (!emp) return;
   $('#att-set').onclick = () => editAttEmployee(emp.id);
   $('#att-ai').onclick = () => { chat.open = true; chatRender(); const i = $('#chat-in'); if (i) { i.value = `${emp.name}, ${monthLabel(month)}: `; i.focus(); } };
-  if ($('#att-done')) $('#att-done').onclick = () => { const r = attRec(emp.id, month); act(async () => ok(await sb.from('att_months').update({ status: r.status === 'done' ? 'draft' : 'done' }).eq('id', r.id)), r.status === 'done' ? 'Vráceno' : 'Označeno jako hotové ✓'); };
+  if ($('#att-done')) $('#att-done').onclick = () => { const r = attRec(emp.id, month);
+    if (!r) return act(async () => ok(await sb.from('att_months').insert({ employee_id: emp.id, month, entries: DC.autoEntries(month, emp), sources: [{ ...AUTO_SRC, at: new Date().toISOString() }], status: 'done' })), 'Označeno jako hotové ✓');
+    act(async () => ok(await sb.from('att_months').update({ status: r.status === 'done' ? 'draft' : 'done' }).eq('id', r.id)), r.status === 'done' ? 'Vráceno' : 'Označeno jako hotové ✓'); };
   if ($('#att-xlsx')) $('#att-xlsx').onclick = async () => {
     try { const c = attComp(emp, month); await downloadWorkbook(fileSafe(`Evidence pracovni doby ${emp.name} ${month}`) + '.xlsx', wb => addAttendanceSheet(wb, c, emp, emp.name)); toast('Excel stažen ✓'); }
     catch (e) { toast('Chyba: ' + e.message); }
@@ -576,7 +582,8 @@ async function callAssistant(payload) {
 function editAttDay(emp, month, date) {
   const rec = attRec(emp.id, month);
   // obědy ze systému docházky se nepoužívají (oběd dopočítá aplikace) → v úpravě dne je neukazujeme
-  const list = (rec?.entries || []).filter(e => e.date === date && e.kind !== 'lunch').map(e => ({ ...e }));
+  const base = attEntries(emp, month), fromAuto = !rec?.entries?.length && base.length;
+  const list = base.filter(e => e.date === date && e.kind !== 'lunch').map(e => ({ ...e }));
   const d = new Date(date + 'T12:00:00');
   const kinds = Object.entries(DC.KIND_LABEL).filter(([k]) => k !== 'lunch');
   const rowHtml = (e, i) => `<div class="ad-row" data-i="${i}">
@@ -620,10 +627,13 @@ function editAttDay(emp, month, date) {
   $('#ad-save').onclick = async () => {
     read();
     for (const e of list) { if (e.kind === 'work' && (!e.start || !e.end)) return toast('U práce vyplň příchod i odchod'); if (e.kind !== 'work' && e.kind !== 'lunch' && !(e.minutes > 0)) return toast('U nepřítomnosti vyplň hodiny nebo čas od–do'); }
-    const all = [...(rec?.entries || []).filter(e => e.date !== date), ...list.map(e => ({ ...e, edited: true }))].sort((a, b) => (a.date + (a.start || '')).localeCompare(b.date + (b.start || '')));
+    const all = [...base.filter(e => e.date !== date), ...list.map(e => ({ ...e, edited: true }))].sort((a, b) => (a.date + (a.start || '')).localeCompare(b.date + (b.start || '')));
     const sd = { ...(rec?.shiftDays || {}) }; const sv = $('#ad-shift')?.value; if (sv) sd[date] = sv; else delete sd[date];
     closeModal();
-    await act(async () => ok(await sb.from('att_months').upsert({ employee_id: emp.id, month, entries: all, shift_days: sd, updated_at: new Date().toISOString(), ...(rec ? (rec.sources || []).some(x => x.kind === 'manual') ? {} : { sources: [...(rec.sources || []), { id: 'manual', kind: 'manual', name: 'ruční úpravy', at: new Date().toISOString() }] } : { sources: [{ id: 'manual', kind: 'manual', name: 'ruční úpravy', at: new Date().toISOString() }] }) }, { onConflict: 'employee_id,month' })), 'Den uložen ✓');
+    await act(async () => ok(await sb.from('att_months').upsert({ employee_id: emp.id, month, entries: all, shift_days: sd, updated_at: new Date().toISOString(), sources: (() => { const cur = [...(rec?.sources || [])], at = new Date().toISOString();
+      if (fromAuto && !cur.some(x => x.kind === 'auto')) cur.push({ ...AUTO_SRC, at });
+      if (!cur.some(x => x.kind === 'manual')) cur.push({ id: 'manual', kind: 'manual', name: 'ruční úpravy', at });
+      return cur; })() }, { onConflict: 'employee_id,month' })), 'Den uložen ✓');
   };
 }
 function editAttEmployee(id) {
@@ -631,6 +641,7 @@ function editAttEmployee(id) {
   const F = [['name', 'Jméno a příjmení', 'text'], ['department', 'Oddělení', 'text'], ['position', 'Funkce', 'text'], ['employer', 'Zaměstnavatel (do Excelu)', 'text'], ['contract', 'Pracovní poměr', 'text'],
     ['weekly_hours', 'Týdenní pracovní doba (h)', 'num'], ['daily_hours', 'Denní fond (h)', 'num'], ['shift_start', 'Začátek směny', 'time'], ['shift_end', 'Konec směny', 'time'],
     ['alt_shift_start', 'Střídavá směna od (nepovinné)', 'time'], ['alt_shift_end', 'Střídavá směna do', 'time'],
+    ['auto_start', 'Automatická docházka od (nepovinné)', 'time'], ['auto_end', 'Automatická docházka do', 'time'],
     ['lunch_minutes', 'Oběd (min)', 'num'], ['lunch_after_minutes', 'Oběd, když práce déle než (min)', 'num'], ['lunch_default', 'Oběd od', 'time'],
     ['round_start', 'Příchod zaokrouhlit na (min)', 'num'], ['round_end', 'Odchod zaokrouhlit na (min)', 'num'], ['end_tolerance', 'Odchod do X min po konci směny = konec směny', 'num']];
   $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:720px">
@@ -647,6 +658,7 @@ function editAttEmployee(id) {
     for (const el of document.querySelectorAll('[data-ae]')) { const v = el.value.trim(); if (el.dataset.t === 'num') { const n = Number(v.replace(',', '.')); if (!Number.isFinite(n)) return toast('Zkontroluj čísla'); row[el.dataset.ae] = n; } else row[el.dataset.ae] = v; }
     if (!row.name) return toast('Vyplň jméno');
     if (!!row.alt_shift_start !== !!row.alt_shift_end) return toast('Střídavou směnu vyplň celou (od i do), nebo nech prázdnou');
+    if (!!row.auto_start !== !!row.auto_end) return toast('Automatickou docházku vyplň celou (od i do), nebo nech prázdnou');
     row.active = $('#ae-active').checked;
     closeModal(); act(async () => ok(await sb.from('att_employees').update(row).eq('id', id)), 'Uloženo ✓');
   };

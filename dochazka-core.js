@@ -54,6 +54,19 @@ export function czHolidays(y) {
   return out;
 }
 
+// ---------- automatická docházka (pevný čas každý pracovní den, např. 1 h denně) ----------
+export const hasAuto = emp => toMin(emp?.auto_start) != null && toMin(emp?.auto_end) != null && toMin(emp.auto_end) > toMin(emp.auto_start);
+export function autoEntries(month, emp) {
+  if (!hasAuto(emp)) return [];
+  const [Y, M] = month.split('-').map(Number), hol = czHolidays(Y), n = new Date(Date.UTC(Y, M, 0)).getUTCDate(), out = [];
+  for (let d = 1; d <= n; d++) {
+    const date = ymd(Y, M, d), dow = new Date(Date.UTC(Y, M - 1, d)).getUTCDay();
+    if (dow === 0 || dow === 6 || hol[date]) continue;
+    out.push({ date, kind: 'work', start: emp.auto_start, end: emp.auto_end, minutes: toMin(emp.auto_end) - toMin(emp.auto_start), exact: true, label: 'Práce (automaticky)', src: 'auto' });
+  }
+  return out;
+}
+
 // ---------- čtení exportu z docházkového systému (text z PDF) ----------
 const CZ_MON = { led: 1, úno: 2, uno: 2, bře: 3, bre: 3, dub: 4, kvě: 5, kve: 5, čvn: 6, cvn: 6, čer: 6, čvc: 7, cvc: 7, srp: 8, zář: 9, zar: 9, říj: 10, rij: 10, lis: 11, pro: 12 };
 export function kindFromLabel(label) {
