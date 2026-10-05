@@ -13,7 +13,7 @@ export function loadExcelJS() {
   });
 }
 const T = m => m == null ? null : m / 1440;             // minuty → Excel čas
-const F_TIME = 'h:mm;@', F_LUNCH = 'h:mm', F_SUM = '[h]:mm:ss;@', F_NUM = '#,##0.00', F_DATE = 'mm-dd-yy'; // mm-dd-yy = vestavěné „krátké datum“ (v CZ Excelu 1.8.2026)
+const F_TIME = 'h:mm;@', F_LUNCH = 'h:mm', F_SUM = '[h]:mm:ss;@', F_NUM = '#,##0.00', F_DATE = 'd.m.yyyy'; // datum jako 1.9.2026
 // barvy z předlohy (motiv Office)
 const LAV = 'FFE6D5F3', GREEN = 'FFE2EFDA', BLUE = 'FFD9E1F2', YELLOW = 'FFFFF2CC', WEEKEND = 'FFF2F2F2', GREY = 'FFD9D9D9', HOL = 'FFFFF2CC';
 const RED_T = 'FFC00000', BLUE_T = 'FF0070C0', RED = 'FFFF0000';

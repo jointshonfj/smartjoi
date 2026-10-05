@@ -1,8 +1,8 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261005e';
-import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261005e';
+import * as DC from './dochazka-core.js?v=20261005f';
+import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261005f';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -381,7 +381,7 @@ function renderAttApp(empId) {
       <div><div class="eyebrow">Aplikace 04 · Docházka a podklady pro účetní</div><h1>DocházkoBot</h1></div>
       <div class="row">${(() => { const y = ui.attMonth.slice(0, 4), own = S.att.holidays.filter(h => h.date.startsWith(ui.attMonth)); const ok2 = S.att.holidays.some(h => h.date.startsWith(y + '-'));
           const list = ok2 ? own : Object.entries(DC.czHolidays(+y)).filter(([d]) => d.startsWith(ui.attMonth)).map(([date, name]) => ({ date, name }));
-          return `<span class="small ${ok2 ? 'muted' : ''}" title="${ok2 ? 'Státní svátky načtené z internetu (date.nager.at)' : 'Svátky se nepodařilo načíst z internetu – použit výpočet'}">${ok2 ? '' : '⚠ '}Svátky: ${list.length ? list.map(h => `${+h.date.slice(8)}. ${+h.date.slice(5, 7)}.`).join(', ') : 'žádné'}</span>`; })()}
+          return `<span class="small ${ok2 ? 'muted' : ''}" title="${ok2 ? 'Státní svátky načtené z internetu (date.nager.at)' : 'Svátky se nepodařilo načíst z internetu – použit výpočet'}">${ok2 ? '' : '⚠ '}Svátky: ${list.length ? list.map(h => `${+h.date.slice(8)}.${+h.date.slice(5, 7)}.${h.date.slice(0, 4)}`).join(', ') : 'žádné'}</span>`; })()}
         <span class="att-month"><button class="btn sm ghost" data-amon="-1" title="Předchozí měsíc">‹</button><b>${esc(monthLabel(month))}</b><button class="btn sm ghost" data-amon="1" title="Další měsíc">›</button></span>
         <button class="btn" id="att-all" title="Jeden sešit, list pro každého zaměstnance">⬇ Excel – všichni</button></div>
     </div>
@@ -461,7 +461,7 @@ function attEmployeeView(emp, month) {
         const abs = [d.vac && `D ${DC.fmtHM(d.vac)}`, d.sick && `N ${DC.fmtHM(d.sick)}`, d.doc && `L ${DC.fmtHM(d.doc)}`, d.other && `J ${DC.fmtHM(d.other)}`].filter(Boolean).join(' · ');
         const segs = d.segs.map(s => { const raw = (s.rs !== s.s || s.re !== s.e) ? `<div class="raw">${DC.fmtClock(s.rs)}–${DC.fmtClock(s.re)}</div>` : ''; return `<div>${DC.fmtClock(s.s)}–${DC.fmtClock(s.e)}${s.exactStart || s.exactEnd ? ' <span title="Přesný čas, nezaokrouhluje se">⚑</span>' : ''}</div>${raw}`; }).join('');
         return `<tr class="${d.holiday ? 'hol' : d.weekend ? 'we' : ''}" data-aday="${d.date}">
-          <td><b>${d.day}.</b> <span class="muted small">${d.dayName.slice(0, 2)}</span>${d.alt ? ` <span class="badge info" title="Delší směna ${esc(emp.alt_shift_start)}–${esc(emp.alt_shift_end)}${d.altManual ? ' (nastaveno ručně)' : ''}">${esc(emp.alt_shift_start)}${d.altManual ? '✎' : ''}</span>` : d.altManual ? ` <span class="badge" title="Ručně nastavena běžná směna">${esc(emp.shift_start)}✎</span>` : ''}</td>
+          <td><b>${d.day}.${+month.slice(5)}.${month.slice(0, 4)}</b> <span class="muted small">${d.dayName.slice(0, 2)}</span>${d.alt ? ` <span class="badge info" title="Delší směna ${esc(emp.alt_shift_start)}–${esc(emp.alt_shift_end)}${d.altManual ? ' (nastaveno ručně)' : ''}">${esc(emp.alt_shift_start)}${d.altManual ? '✎' : ''}</span>` : d.altManual ? ` <span class="badge" title="Ručně nastavena běžná směna">${esc(emp.shift_start)}✎</span>` : ''}</td>
           <td>${segs || '<span class="muted">—</span>'}</td>
           <td class="hide-m small">${d.lunch ? `${DC.fmtClock(d.lunch.s)}–${DC.fmtClock(d.lunch.e)}` : ''}</td>
           <td class="num">${d.netto ? DC.fmtHM(d.netto) : ''}</td>
@@ -617,7 +617,7 @@ function editAttDay(emp, month, date) {
     e.label = DC.KIND_LABEL[e.kind]; e.date = date;
   });
   $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:720px">
-    <div class="modal-head"><h2>${esc(emp.name)} · ${d.toLocaleDateString('cs-CZ', { weekday: 'long', day: 'numeric', month: 'numeric', year: 'numeric' })}</h2><button class="icon-btn" data-close>✕</button></div>
+    <div class="modal-head"><h2>${esc(emp.name)} · ${d.toLocaleDateString('cs-CZ', { weekday: 'long' })} ${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear()}</h2><button class="icon-btn" data-close>✕</button></div>
     <div class="small muted" style="margin-bottom:8px">Časy zadávej podle skutečnosti — zaokrouhlení a oběd se dopočítají samy (oběd ze systému docházky se nepoužívá). „Přesně“ = čas se nezaokrouhlí.</div>
     ${hasAlt(emp) && ![0, 6].includes(d.getDay()) ? `<label class="field" style="margin-bottom:10px"><span>Směna</span><select id="ad-shift">
       <option value="">Automaticky (skončil v ${esc(emp.alt_shift_end)} → ${esc(emp.alt_shift_start)}–${esc(emp.alt_shift_end)})</option>
