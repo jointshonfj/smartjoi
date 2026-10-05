@@ -28,7 +28,7 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
   const lastCol = hasNotes ? 'T' : hasOther ? 'S' : 'R';
   const ALL = 'ABCDEFGHIJKLMNOPQRST';
   const cols = ALL.slice(0, ALL.indexOf(lastCol) + 1).split('');
-  const ws = wb.addWorksheet(sheetName.slice(0, 31), { pageSetup: { orientation: 'landscape', paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 0, margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 } } });
+  const ws = wb.addWorksheet(sheetName.slice(0, 31), { pageSetup: { orientation: 'landscape', paperSize: 9, fitToPage: false, horizontalCentered: true, margins: { left: 0.4, right: 0.4, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 } } });
   ws.columns = cols.map(c => ({ width: { A: 8.83, B: 7, J: 7, R: 8.83, S: 9, T: 30 }[c] || 8.43 }));
   const font = (c, o = {}) => { c.font = { name: 'Arial', size: 8, ...o }; };
   const set = (addr, v, o = {}) => {
@@ -43,7 +43,7 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
   // hlavička
   ws.mergeCells(`A1:${lastCol === 'T' ? 'T' : 'R'}1`); set('A1', 'EVIDENCE PRACOVNÍ DOBY', { bold: true, underline: true, size: 11, align: 'center', valign: 'top' });
   ws.getRow(2).height = 10.25;
-  for (const r of [3, 4, 5, 6]) ws.getRow(r).height = 13.25;
+  for (const r of [3, 4, 5, 6]) ws.getRow(r).height = 15;
   for (const r of [4, 5, 6]) ws.mergeCells(`A${r}:D${r}`);
   set('A3', 'Označení  zaměstnavatele: ', { align: 'left' }); set('E3', emp.employer || '', { align: 'left' });
   set('N3', 'ROK:', { align: 'right' }); set('O3', Y, { bold: true, align: 'left' });
@@ -76,7 +76,7 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
     const n = Math.max(1, d.segs.length), r0 = r;
     const fill = d.holiday && !d.weekend ? HOL : d.weekend ? WEEKEND : null;
     for (let i = 0; i < n; i++, r++) {
-      ws.getRow(r).height = 13.25;
+      ws.getRow(r).height = 15;   // výška řádků tabulky pro tisk
       for (const c of cols) {
         const cell = ws.getCell(`${c}${r}`); font(cell, { bold: c === 'A' || c === 'B' }); cell.border = box;
         cell.alignment = { horizontal: c === 'A' || c === 'B' || c === 'T' ? 'left' : 'center' };
@@ -107,7 +107,9 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
 
   // souhrn (rozložení jako předloha)
   const withHol = comp.days.some(d => d.holiday && !d.weekend && d.netto);
-  let s = last + 4;
+  // tisk: strana 1 = evidence (hlavička + dny), strana 2 = souhrn
+  ws.getRow(last).addPageBreak();
+  let s = last + 2;
   set(`A${s}`, 'SOUHRN', { bold: true, underline: true, color: RED_T, align: 'left' }); ws.getRow(s + 1).height = 7; s += 2;
   const R = {}; // řádky souhrnu podle klíče
   const row = (key, label, formula, minutes, o = {}) => {
@@ -130,7 +132,7 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
   row('wk', withHol ? 'Odpracováno o víkendu a ve svátek celkem:' : 'Odpracováno o víkendu celkem:', wkI.length ? wkI.join('+') : `E${k.all}-E${k.all}`, S.nettoWeekend);
   ws.getRow(s).height = 20; ws.getRow(s + 1).height = 20; ws.getRow(s + 2).height = 20; s += 2;
   set(`A${s}`, 'SOUHRN PRO ÚČETNÍ', { bold: true, underline: true, color: BLUE_T }); ws.getRow(s + 1).height = 7; s += 2;
-  const minus = ['vac', 'sick', 'doc', 'miss', 'other', 'hol'].filter(x => k[x]).map(x => `-E${k[x]}`).join('');
+  const minus = ['vac', 'sick', 'doc', 'miss', 'other'].filter(x => k[x]).map(x => `-E${k[x]}`).join('');
   row('worked', 'Odpracováno:', `E${k.fond}${minus}`, S.worked, { dec: true, fill: GREY });
   row('total', 'Odpracováno včetně svátků a přesčasů:', `E${k.worked}+E${k.over}${k.hol ? `+E${k.hol}` : ''}`, S.workedTotal, { dec: true, fill: GREY });
   row('over', 'Přesčas celkem:', `SUM(N10:N${last})`, S.over, { dec: true, fill: LAV });
@@ -141,12 +143,20 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
   row('doc', 'Návštěva lékaře:', `SUM(Q10:Q${last})`, S.doc, { dec: true });
   row('miss', 'Chybějící odpracovaný čas:', `SUM(R10:R${last})`, S.missing, { dec: true, red: true });
   if (hasOther) row('other', 'Jiná placená překážka:', `SUM(S10:S${last})`, S.other, { dec: true });
-  if (S.holiday) row('hol', 'Státní svátky (placené):', holG.join('+'), S.holiday, { dec: true, fill: HOL });
+  // svátky nejsou ve fondu (G je prázdné) → placené hodiny za svátky = počet svátků × denní fond
+  const perHol = holG.length ? Math.round(S.holiday / holG.length) : 0;
+  if (S.holiday) row('hol', 'Státní svátky (placené):', `${holG.length}*TIME(${Math.floor(perHol / 60)},${perHol % 60},0)`, S.holiday, { dec: true, fill: HOL });
   for (const [key, rr] of Object.entries(k)) if (R[key] !== rr) throw new Error(`Souhrn: nesedí řádek ${key}`);
   // Odprac. prac. dnů = odpracováno (desetinné hodiny) / denní fond — jako v předloze
   const daily = Number(emp.daily_hours) || 8;
   ws.getCell('R5').value = S.worked ? { formula: `G${k.worked}/${String(daily)}`, result: S.workedDays } : 0;
   ws.views = [{ state: 'frozen', ySplit: 9 }];
+  // měřítko tisku tak, aby se celá evidence vešla na 1 stranu A4 na šířku (přesně, „přizpůsobit“ by ruční zalomení ignorovalo)
+  const ptW = cols.reduce((t, c) => t + (Math.trunc((ws.getColumn(c).width || 8.43) * 7 + 5) * 0.75), 0);
+  let ptH = 0; for (let i = 1; i <= last; i++) ptH += ws.getRow(i).height || 15;
+  const inch = 72, m = ws.pageSetup.margins, availW = 842 - (m.left + m.right) * inch, availH = 595 - (m.top + m.bottom) * inch - 6;
+  ws.pageSetup.scale = Math.max(40, Math.min(100, Math.floor(Math.min(availW / ptW, availH / ptH) * 100)));
+  ws.pageSetup.printArea = `A1:${cols[cols.length - 1]}${s - 1}`;
   return ws;
 }
 

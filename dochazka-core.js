@@ -9,7 +9,7 @@ export const KIND_LABEL = {
 };
 export const DEFAULT_EMP = {
   daily_hours: 8, weekly_hours: 40, shift_start: '07:30', shift_end: '16:00', lunch_minutes: 30, lunch_after_minutes: 360,
-  lunch_default: '12:00', round_start: 15, round_end: 15, round_start_mode: 'nearest', round_end_mode: 'down', end_tolerance: 10, alt_shift_start: '', alt_shift_end: '',
+  lunch_default: '12:00', round_start: 5, round_end: 15, round_start_mode: 'up', round_end_mode: 'down', start_tolerance: 5, end_tolerance: 10, alt_shift_start: '', alt_shift_end: '',
 };
 const DAY_NAMES = ['Neděle', 'Pondělí', 'Úterý', 'Středa', 'Čtvrtek', 'Pátek', 'Sobota'];
 export const MONTH_NAMES = ['LEDEN', 'ÚNOR', 'BŘEZEN', 'DUBEN', 'KVĚTEN', 'ČERVEN', 'ČERVENEC', 'SRPEN', 'ZÁŘÍ', 'ŘÍJEN', 'LISTOPAD', 'PROSINEC'];
@@ -43,6 +43,8 @@ function easter(y) { // gregoriánský algoritmus
   const month = Math.floor((h + l - 7 * m + 114) / 31), day = ((h + l - 7 * m + 114) % 31) + 1;
   return new Date(Date.UTC(y, month - 1, day));
 }
+// svátky z internetu (tabulka att_holidays, zdroj date.nager.at) mají přednost; výpočet níže je jen záloha
+export const holidaysFor = (y, list) => { const own = Object.fromEntries((list || []).filter(h => String(h.date).startsWith(y + '-')).map(h => [String(h.date).slice(0, 10), h.name])); return Object.keys(own).length ? own : czHolidays(y); };
 export function czHolidays(y) {
   const H = { '01-01': 'Nový rok, Den obnovy samostatného českého státu', '05-01': 'Svátek práce', '05-08': 'Den vítězství', '07-05': 'Den slovanských věrozvěstů Cyrila a Metoděje',
     '07-06': 'Den upálení mistra Jana Husa', '09-28': 'Den české státnosti', '10-28': 'Den vzniku samostatného československého státu', '11-17': 'Den boje za svobodu a demokracii',
@@ -56,9 +58,9 @@ export function czHolidays(y) {
 
 // ---------- automatická docházka (pevný čas každý pracovní den, např. 1 h denně) ----------
 export const hasAuto = emp => toMin(emp?.auto_start) != null && toMin(emp?.auto_end) != null && toMin(emp.auto_end) > toMin(emp.auto_start);
-export function autoEntries(month, emp) {
+export function autoEntries(month, emp, holidays) {
   if (!hasAuto(emp)) return [];
-  const [Y, M] = month.split('-').map(Number), hol = czHolidays(Y), n = new Date(Date.UTC(Y, M, 0)).getUTCDate(), out = [];
+  const [Y, M] = month.split('-').map(Number), hol = holidaysFor(Y, holidays), n = new Date(Date.UTC(Y, M, 0)).getUTCDate(), out = [];
   for (let d = 1; d <= n; d++) {
     const date = ymd(Y, M, d), dow = new Date(Date.UTC(Y, M - 1, d)).getUTCDay();
     if (dow === 0 || dow === 6 || hol[date]) continue;
@@ -110,7 +112,7 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
   const emp = { ...DEFAULT_EMP, ...Object.fromEntries(Object.entries(empIn || {}).filter(([, v]) => v !== null && v !== undefined && v !== '')) };
   const [Y, M] = month.split('-').map(Number);
   const nDays = new Date(Date.UTC(Y, M, 0)).getUTCDate();
-  const hol = czHolidays(Y);
+  const hol = holidaysFor(Y, opts.holidays);
   const hasAlt = toMin(emp.alt_shift_start) != null && toMin(emp.alt_shift_end) != null, shiftDays = opts.shiftDays || {};
   const dayFund = Math.round(Number(emp.daily_hours) * 60);
   const byDate = {}; for (const e of entries || []) (byDate[e.date] ||= []).push(e);
@@ -131,7 +133,8 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
     for (const w of work) { const last = segs[segs.length - 1]; if (last && w.s <= last.e) { last.e = Math.max(last.e, w.e); last.re = Math.max(last.re, w.re); last.exactEnd = w.exact; } else segs.push({ ...w, exactStart: w.exact, exactEnd: w.exact }); }
     if (segs.length) {
       const f = segs[0], l = segs[segs.length - 1];
-      if (!f.exactStart) f.s = roundTo(f.s, +emp.round_start, emp.round_start_mode);
+      // příchod: ráno nahoru (výchozí na 5 min); kdo přijde do X min po začátku směny, má začátek směny (7:31 → 7:30)
+      if (!f.exactStart) f.s = !weekend && !holiday && f.s > shiftStart && f.s - shiftStart <= +emp.start_tolerance ? shiftStart : roundTo(f.s, +emp.round_start, emp.round_start_mode);
       if (!l.exactEnd) { let e = roundTo(l.e, +emp.round_end, emp.round_end_mode); if (!weekend && !holiday && e > shiftEnd && e - shiftEnd <= +emp.end_tolerance) e = shiftEnd; l.e = e; }
       for (const s of segs) if (s.e < s.s) s.e = s.s;
     }
@@ -159,7 +162,7 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
     if (docFam) notes.push(`lékař s čl. rodiny ${fmtHM(docFam)} h`);
     if (other) notes.push(`ostatní ${fmtHM(other)} h`);
     for (const e of list) if (e.note) notes.push(e.note);
-    const fund = weekend ? 0 : dayFund;
+    const fund = weekend || holiday ? 0 : dayFund;   // svátek do fondu nejde; práce ve svátek = přesčas
     let holidayMin = 0, over = 0, missing = 0;
     if (holiday && !weekend) { holidayMin = dayFund; notes.unshift('Státní svátek – ' + holiday); over = netto; }
     else if (holiday && weekend) { notes.unshift('Státní svátek – ' + holiday); over = netto; }
@@ -191,7 +194,7 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
     weekendWorked: days.filter(x => (x.weekend || x.holiday) && x.netto > 0).length,
   };
   S.overWorkdays = S.over - S.overWeekend;
-  S.worked = S.fund - S.vac - S.sick - S.doc - S.other - S.missing - S.holiday;   // „Odpracováno“ (pro účetní)
+  S.worked = S.fund - S.vac - S.sick - S.doc - S.other - S.missing;   // „Odpracováno“ (pro účetní)
   S.workedTotal = S.worked + S.holiday + S.over;                                   // „včetně svátků a přesčasů“
   S.workedDays = Math.round((S.worked / (Number(emp.daily_hours) * 60)) * 100) / 100;
   return { month, emp, days, sum: S };

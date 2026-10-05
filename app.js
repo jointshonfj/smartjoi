@@ -1,8 +1,8 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261005a';
-import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261005a';
+import * as DC from './dochazka-core.js?v=20261005d';
+import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261005d';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -91,7 +91,7 @@ async function fetchAll(table, build = q => q) {
 }
 async function loadState() {
   const since = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock, attEmps, attMonths, aiMem] = await Promise.all([
+  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock, attEmps, attMonths, aiMem, attHol] = await Promise.all([
     sb.from('settings').select('*').eq('id', 1).single().then(ok),
     fetchAll('suppliers', q => q.order('name')),
     fetchAll('products', q => q.order('code')),
@@ -105,6 +105,7 @@ async function loadState() {
     fetchAll('att_employees', q => q.order('sort').order('name')),
     fetchAll('att_months', q => q.order('month', { ascending: false })),
     fetchAll('ai_memory', q => q.order('created_at')),
+    fetchAll('att_holidays', q => q.order('date')).catch(() => []),
   ]);
   const products = {};
   for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name, nameEn: p.name_en || '', nameEnSrc: p.name_en_src || '', mpn: p.mpn || '', shoptetSupplier: p.shoptet_supplier || '' };
@@ -122,6 +123,7 @@ async function loadState() {
       employees: attEmps.map(e => ({ ...e, weekly_hours: Number(e.weekly_hours), daily_hours: Number(e.daily_hours) })),
       months: attMonths.map(r => ({ id: r.id, employeeId: r.employee_id, month: r.month, entries: r.entries || [], shiftDays: r.shift_days || {}, sources: r.sources || [], report: r.report, status: r.status, note: r.note, updatedAt: r.updated_at })),
       memory: aiMem.map(m => ({ id: m.id, scope: m.scope, text: m.text, createdAt: m.created_at })),
+      holidays: attHol.map(h => ({ date: String(h.date).slice(0, 10), name: h.name })),
     },
     emails: emails.map(e => ({ id: e.id, title: e.title, category: e.category || '', to: e.to_addr || '', cc: e.cc || '', subject: e.subject || '', body: e.body || '', note: e.note || '', pinned: !!e.pinned, useCount: e.use_count || 0, lastUsed: e.last_used_at, updatedAt: e.updated_at })),
     sync: { fetchedAt: st.last_sync_at, error: st.last_sync_error, errorAt: st.last_sync_error_at, headers: st.sync_headers || [], rowCount: st.sync_row_count, sample: st.sync_sample || [], statuses: st.sync_statuses || {} },
@@ -351,8 +353,8 @@ const attEmp = id => S.att.employees.find(e => e.id === id);
 const attRec = (empId, month) => S.att.months.find(r => r.employeeId === empId && r.month === month);
 // zaměstnanec s automatickou docházkou (např. 1 h denně): bez nahraného záznamu se měsíc vyplní sám
 const AUTO_SRC = { id: 'auto', kind: 'auto', name: 'automaticky', at: null };
-const attEntries = (emp, month) => { const r = attRec(emp.id, month); return r?.entries?.length ? r.entries : DC.hasAuto(emp) ? DC.autoEntries(month, emp) : []; };
-const attComp = (emp, month) => { const r = attRec(emp.id, month), list = attEntries(emp, month); return list.length ? DC.computeMonth(month, list, emp, { shiftDays: r?.shiftDays }) : null; };
+const attEntries = (emp, month) => { const r = attRec(emp.id, month); return r?.entries?.length ? r.entries : DC.hasAuto(emp) ? DC.autoEntries(month, emp, S.att.holidays) : []; };
+const attComp = (emp, month) => { const r = attRec(emp.id, month), list = attEntries(emp, month); return list.length ? DC.computeMonth(month, list, emp, { shiftDays: r?.shiftDays, holidays: S.att.holidays }) : null; };
 const hasAlt = e => !!(e.alt_shift_start && e.alt_shift_end);
 const shiftText = e => `směna ${e.shift_start}–${e.shift_end}${hasAlt(e) ? ` (střídá s ${e.alt_shift_start}–${e.alt_shift_end})` : ''}`;
 const hh = m => DC.hours(m || 0).toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -360,15 +362,27 @@ const fileSafe = t => String(t).normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 const firstName = n => String(n).split(' ')[0];
 const nameKey = n => fold(n).split(/\s+/).filter(Boolean).sort().join(' ');
 
+// státní svátky: načtou se z internetu (přes SmartJoiAI funkci, zdroj date.nager.at) a uloží do databáze
+const holTried = {};
+async function ensureHolidays(year) {
+  if (holTried[year] || S.att.holidays.some(h => h.date.startsWith(year + '-'))) return;
+  holTried[year] = true;
+  try { const j = await callAssistant({ task: 'holidays', year }); if (j.holidays?.length) { S.att.holidays.push(...j.holidays); render(); } }
+  catch (e) { console.warn('svátky', e); }
+}
 function renderAttApp(empId) {
   ui.attMonth ||= prevMonth();
+  ensureHolidays(Number(ui.attMonth.slice(0, 4)));
   const month = ui.attMonth, emps = S.att.employees.filter(e => e.active);
   const emp = empId ? attEmp(empId) : null;
   const statusDot = e => { const r = attRec(e.id, month); return !r || !r.entries.length ? (DC.hasAuto(e) ? ' <span class="att-dot" title="Automaticky">⚡</span>' : '') : r.status === 'done' ? ' <span class="att-dot done" title="Hotovo">✓</span>' : ' <span class="att-dot" title="Nahráno">•</span>'; };
   let h = `
     <div class="page-head">
       <div><div class="eyebrow">Aplikace 04 · Docházka a podklady pro účetní</div><h1>DocházkoBot</h1></div>
-      <div class="row"><span class="att-month"><button class="btn sm ghost" data-amon="-1" title="Předchozí měsíc">‹</button><b>${esc(monthLabel(month))}</b><button class="btn sm ghost" data-amon="1" title="Další měsíc">›</button></span>
+      <div class="row">${(() => { const y = ui.attMonth.slice(0, 4), own = S.att.holidays.filter(h => h.date.startsWith(ui.attMonth)); const ok2 = S.att.holidays.some(h => h.date.startsWith(y + '-'));
+          const list = ok2 ? own : Object.entries(DC.czHolidays(+y)).filter(([d]) => d.startsWith(ui.attMonth)).map(([date, name]) => ({ date, name }));
+          return `<span class="small ${ok2 ? 'muted' : ''}" title="${ok2 ? 'Státní svátky načtené z internetu (date.nager.at)' : 'Svátky se nepodařilo načíst z internetu – použit výpočet'}">${ok2 ? '' : '⚠ '}Svátky: ${list.length ? list.map(h => `${+h.date.slice(8)}. ${+h.date.slice(5, 7)}.`).join(', ') : 'žádné'}</span>`; })()}
+        <span class="att-month"><button class="btn sm ghost" data-amon="-1" title="Předchozí měsíc">‹</button><b>${esc(monthLabel(month))}</b><button class="btn sm ghost" data-amon="1" title="Další měsíc">›</button></span>
         <button class="btn" id="att-all" title="Jeden sešit, list pro každého zaměstnance">⬇ Excel – všichni</button></div>
     </div>
     <div class="tabs">
@@ -472,7 +486,7 @@ function bindAtt(emp, month) {
   $('#att-set').onclick = () => editAttEmployee(emp.id);
   $('#att-ai').onclick = () => { chat.open = true; chatRender(); const i = $('#chat-in'); if (i) { i.value = `${emp.name}, ${monthLabel(month)}: `; i.focus(); } };
   if ($('#att-done')) $('#att-done').onclick = () => { const r = attRec(emp.id, month);
-    if (!r) return act(async () => ok(await sb.from('att_months').insert({ employee_id: emp.id, month, entries: DC.autoEntries(month, emp), sources: [{ ...AUTO_SRC, at: new Date().toISOString() }], status: 'done' })), 'Označeno jako hotové ✓');
+    if (!r) return act(async () => ok(await sb.from('att_months').insert({ employee_id: emp.id, month, entries: DC.autoEntries(month, emp, S.att.holidays), sources: [{ ...AUTO_SRC, at: new Date().toISOString() }], status: 'done' })), 'Označeno jako hotové ✓');
     act(async () => ok(await sb.from('att_months').update({ status: r.status === 'done' ? 'draft' : 'done' }).eq('id', r.id)), r.status === 'done' ? 'Vráceno' : 'Označeno jako hotové ✓'); };
   if ($('#att-xlsx')) $('#att-xlsx').onclick = async () => {
     try { const c = attComp(emp, month); await downloadWorkbook(fileSafe(`Evidence pracovni doby ${emp.name} ${month}`) + '.xlsx', wb => addAttendanceSheet(wb, c, emp, emp.name)); toast('Excel stažen ✓'); }
@@ -643,11 +657,11 @@ function editAttEmployee(id) {
     ['alt_shift_start', 'Střídavá směna od (nepovinné)', 'time'], ['alt_shift_end', 'Střídavá směna do', 'time'],
     ['auto_start', 'Automatická docházka od (nepovinné)', 'time'], ['auto_end', 'Automatická docházka do', 'time'],
     ['lunch_minutes', 'Oběd (min)', 'num'], ['lunch_after_minutes', 'Oběd, když práce déle než (min)', 'num'], ['lunch_default', 'Oběd od', 'time'],
-    ['round_start', 'Příchod zaokrouhlit na (min)', 'num'], ['round_end', 'Odchod zaokrouhlit na (min)', 'num'], ['end_tolerance', 'Odchod do X min po konci směny = konec směny', 'num']];
+    ['round_start', 'Příchod zaokrouhlit na (min)', 'num'], ['round_end', 'Odchod zaokrouhlit na (min)', 'num'], ['start_tolerance', 'Příchod do X min po začátku směny = začátek směny', 'num'], ['end_tolerance', 'Odchod do X min po konci směny = konec směny', 'num']];
   $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:720px">
     <div class="modal-head"><h2>Nastavení · ${esc(e.name)}</h2><button class="icon-btn" data-close>✕</button></div>
     <div class="grid-2">${F.map(([k, l, t]) => `<label class="field"><span>${l}</span><input type="${t === 'time' ? 'time' : 'text'}" ${t === 'num' ? 'inputmode="decimal"' : ''} data-ae="${k}" data-t="${t}" value="${esc(String(e[k] ?? '').replace('.', t === 'num' ? ',' : '.'))}"></label>`).join('')}</div>
-    <div class="grid-2" style="margin-top:10px">${[['round_start_mode', 'Příchod zaokrouhlovat'], ['round_end_mode', 'Odchod zaokrouhlovat']].map(([k, l]) => `<label class="field"><span>${l}</span><select data-ae="${k}" data-t="text">${[['down', 'dolů (7:31 → 7:30)'], ['nearest', 'na nejbližší (7:38 → 7:45)'], ['up', 'nahoru (7:31 → 7:45)']].map(([v, t]) => `<option value="${v}" ${(e[k] || (k === 'round_start_mode' ? 'nearest' : 'down')) === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>`).join('')}</div>
+    <div class="grid-2" style="margin-top:10px">${[['round_start_mode', 'Příchod zaokrouhlovat'], ['round_end_mode', 'Odchod zaokrouhlovat']].map(([k, l]) => `<label class="field"><span>${l}</span><select data-ae="${k}" data-t="text">${[['up', 'nahoru (6:47 → 6:50)'], ['down', 'dolů (16:20 → 16:15)'], ['nearest', 'na nejbližší']].map(([v, t]) => `<option value="${v}" ${(e[k] || (k === 'round_start_mode' ? 'up' : 'down')) === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>`).join('')}</div>
     <label class="chip" style="margin-top:10px"><input type="checkbox" id="ae-active" ${e.active ? 'checked' : ''}> Zobrazovat v DocházkoBotu (odškrtnout = zpracovává se zvlášť)</label>
     <label class="field" style="margin-top:10px"><span>Poznámka / zvláštnosti (čte i SmartJoiAI)</span><textarea data-ae="notes" data-t="text" style="min-height:60px">${esc(e.notes)}</textarea></label>
     <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="ae-save">Uložit</button></div>
