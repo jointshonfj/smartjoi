@@ -29,7 +29,7 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
   const ALL = 'ABCDEFGHIJKLMNOPQRST';
   const cols = ALL.slice(0, ALL.indexOf(lastCol) + 1).split('');
   const ws = wb.addWorksheet(sheetName.slice(0, 31), { pageSetup: { orientation: 'landscape', paperSize: 9, fitToPage: false, horizontalCentered: true, margins: { left: 0.4, right: 0.4, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 } } });
-  ws.columns = cols.map(c => ({ width: { A: 8.83, B: 7, J: 7, R: 8.83, S: 9, T: 30 }[c] || 8.43 }));
+  ws.columns = cols.map(c => ({ width: c === 'T' ? 30 : 7 })); // šířka sloupců 7
   const font = (c, o = {}) => { c.font = { name: 'Arial', size: 8, ...o }; };
   const set = (addr, v, o = {}) => {
     const c = ws.getCell(addr); c.value = v;
