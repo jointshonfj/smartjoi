@@ -1,8 +1,8 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261005g';
-import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261005g';
+import * as DC from './dochazka-core.js?v=20261005h';
+import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261005h';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru

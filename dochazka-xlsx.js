@@ -134,7 +134,7 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
   set(`A${s}`, 'SOUHRN PRO ÚČETNÍ', { bold: true, underline: true, color: BLUE_T }); ws.getRow(s + 1).height = 7; s += 2;
   const minus = ['vac', 'sick', 'doc', 'miss', 'other'].filter(x => k[x]).map(x => `-E${k[x]}`).join('');
   row('worked', 'Odpracováno:', `E${k.fond}${minus}`, S.worked, { dec: true, fill: GREY });
-  row('total', 'Odpracováno včetně svátků a přesčasů:', `E${k.worked}+E${k.over}${k.hol ? `+E${k.hol}` : ''}`, S.workedTotal, { dec: true, fill: GREY });
+  row('total', 'Odpracováno včetně přesčasů:', `E${k.worked}+E${k.over}${k.hol ? `+E${k.hol}` : ''}`, S.workedTotal, { dec: true, fill: GREY });
   row('over', 'Přesčas celkem:', `SUM(N10:N${last})`, S.over, { dec: true, fill: LAV });
   row('overWd', 'Přesčas v pracovní dny:', `E${k.over}-E${k.overWk}`, S.overWorkdays, { dec: true });
   row('overWk', withHol ? 'Přesčas o víkendu a ve svátek:' : 'Přesčas o víkendu:', `E${k.wk}`, S.overWeekend, { dec: true });

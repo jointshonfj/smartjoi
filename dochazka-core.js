@@ -141,6 +141,11 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
     if (segs.length) {
       const f = segs[0], l = segs[segs.length - 1];
       // příchod: ráno nahoru na celou/půl hodinu v okně X min (kancelář 10, sklad 15); kdo přijde do X min po začátku směny, má začátek směny (7:31 → 7:30)
+      // návaznost na nepřítomnost s časem (lékař apod.): hranice se nezaokrouhluje, aby nevznikla mezera (odchod 12:12 → lékař od 12:12)
+      const absT = list.filter(e => e.kind !== 'work' && e.kind !== 'lunch').flatMap(e => [toMin(e.start), toMin(e.end)]).filter(t => t != null);
+      const touches = t => absT.some(a => Math.abs(a - t) <= 5);
+      if (touches(f.rs)) f.exactStart = true;
+      if (touches(l.re)) l.exactEnd = true;
       if (!f.exactStart) f.s = !weekend && !holiday && f.s > shiftStart && f.s - shiftStart <= +emp.start_tolerance ? shiftStart : roundTo(f.s, +emp.round_start, emp.round_start_mode);
       if (!l.exactEnd) { let e = roundTo(l.e, +emp.round_end, emp.round_end_mode); if (!weekend && !holiday && e > shiftEnd && e - shiftEnd <= +emp.end_tolerance) e = shiftEnd; l.e = e; }
       for (const s of segs) if (s.e < s.s) s.e = s.s;
@@ -169,9 +174,9 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
     if (docFam) notes.push(`lékař s čl. rodiny ${fmtHM(docFam)} h`);
     if (other) notes.push(`ostatní ${fmtHM(other)} h`);
     for (const e of list) if (e.note) notes.push(e.note);
-    const fund = weekend || holiday ? 0 : dayFund;   // svátek do fondu nejde; práce ve svátek = přesčas
+    const fund = weekend || holiday ? 0 : dayFund;   // svátek: fond 0, odpracováno 0 (nic se nepřičítá); práce ve svátek = celá přesčas
     let holidayMin = 0, over = 0, missing = 0;
-    if (holiday && !weekend) { holidayMin = dayFund; notes.unshift('Státní svátek – ' + holiday); over = netto; }
+    if (holiday && !weekend) { notes.unshift('Státní svátek – ' + holiday); over = netto; }
     else if (holiday && weekend) { notes.unshift('Státní svátek – ' + holiday); over = netto; }
     else if (weekend) over = netto;
     else {
@@ -202,7 +207,7 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
   };
   S.overWorkdays = S.over - S.overWeekend;
   S.worked = S.fund - S.vac - S.sick - S.doc - S.other - S.missing;   // „Odpracováno“ (pro účetní)
-  S.workedTotal = S.worked + S.holiday + S.over;                                   // „včetně svátků a přesčasů“
+  S.workedTotal = S.worked + S.over;   // „včetně přesčasů“ (svátky se nepřičítají)
   S.workedDays = Math.round((S.worked / (Number(emp.daily_hours) * 60)) * 100) / 100;
   return { month, emp, days, sum: S };
 }
