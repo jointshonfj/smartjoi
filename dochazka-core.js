@@ -9,7 +9,7 @@ export const KIND_LABEL = {
 };
 export const DEFAULT_EMP = {
   daily_hours: 8, weekly_hours: 40, shift_start: '07:30', shift_end: '16:00', lunch_minutes: 30, lunch_after_minutes: 360,
-  lunch_default: '12:00', round_start: 5, round_end: 15, round_start_mode: 'up', round_end_mode: 'down', start_tolerance: 5, end_tolerance: 10, alt_shift_start: '', alt_shift_end: '',
+  lunch_default: '12:00', round_start: 10, round_end: 10, round_start_mode: 'snap_up', round_end_mode: 'snap_down', start_tolerance: 5, end_tolerance: 0, alt_shift_start: '', alt_shift_end: '',
 };
 const DAY_NAMES = ['Neděle', 'Pondělí', 'Úterý', 'Středa', 'Čtvrtek', 'Pátek', 'Sobota'];
 export const MONTH_NAMES = ['LEDEN', 'ÚNOR', 'BŘEZEN', 'DUBEN', 'KVĚTEN', 'ČERVEN', 'ČERVENEC', 'SRPEN', 'ZÁŘÍ', 'ŘÍJEN', 'LISTOPAD', 'PROSINEC'];
@@ -20,8 +20,15 @@ export const fmtClock = m => m == null ? '' : `${String(Math.floor(m / 60)).padS
 export const hours = m => Math.round((m / 60) * 100) / 100;
 const ceilTo = (m, s) => s > 1 ? Math.ceil(m / s) * s : m;
 const floorTo = (m, s) => s > 1 ? Math.floor(m / s) * s : m;
-// zaokrouhlení příchodu/odchodu: down = dolů, up = nahoru, nearest = na nejbližší
-export const roundTo = (m, s, mode) => mode === 'up' ? ceilTo(m, s) : mode === 'nearest' ? (s > 1 ? Math.round(m / s) * s : m) : floorTo(m, s);
+// zaokrouhlení příchodu/odchodu: down = dolů, up = nahoru, nearest = na nejbližší (krok s min)
+// snap_up = nahoru na celou/půl hodinu, jen když chybí max. s min (7:21 → 7:30, 7:19 zůstane)
+// snap_down = dolů na celou/půl hodinu, jen když je max. s min po ní (17:05 → 17:00, 17:17 zůstane)
+export const SNAP_GRID = 30;
+export const roundTo = (m, s, mode) => {
+  if (mode === 'snap_up') { const n = ceilTo(m, SNAP_GRID); return n - m <= s ? n : m; }
+  if (mode === 'snap_down') { const n = floorTo(m, SNAP_GRID); return m - n <= s ? n : m; }
+  return mode === 'up' ? ceilTo(m, s) : mode === 'nearest' ? (s > 1 ? Math.round(m / s) * s : m) : floorTo(m, s);
+};
 const pad = n => String(n).padStart(2, '0');
 export const ymd = (y, m, d) => `${y}-${pad(m)}-${pad(d)}`;
 // pondělí týdne, do kterého datum patří (klíč pro střídání směn)
@@ -133,7 +140,7 @@ export function computeMonth(month, entries, empIn = {}, opts = {}) {
     for (const w of work) { const last = segs[segs.length - 1]; if (last && w.s <= last.e) { last.e = Math.max(last.e, w.e); last.re = Math.max(last.re, w.re); last.exactEnd = w.exact; } else segs.push({ ...w, exactStart: w.exact, exactEnd: w.exact }); }
     if (segs.length) {
       const f = segs[0], l = segs[segs.length - 1];
-      // příchod: ráno nahoru (výchozí na 5 min); kdo přijde do X min po začátku směny, má začátek směny (7:31 → 7:30)
+      // příchod: ráno nahoru na celou/půl hodinu v okně X min (kancelář 10, sklad 15); kdo přijde do X min po začátku směny, má začátek směny (7:31 → 7:30)
       if (!f.exactStart) f.s = !weekend && !holiday && f.s > shiftStart && f.s - shiftStart <= +emp.start_tolerance ? shiftStart : roundTo(f.s, +emp.round_start, emp.round_start_mode);
       if (!l.exactEnd) { let e = roundTo(l.e, +emp.round_end, emp.round_end_mode); if (!weekend && !holiday && e > shiftEnd && e - shiftEnd <= +emp.end_tolerance) e = shiftEnd; l.e = e; }
       for (const s of segs) if (s.e < s.s) s.e = s.s;
