@@ -23,7 +23,7 @@ const fillOf = argb => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } }
 export function addAttendanceSheet(wb, comp, emp, sheetName) {
   const [Y, M] = comp.month.split('-').map(Number);
   const S = comp.sum;
-  const hasOther = S.other > 0, hasNotes = comp.days.some(d => d.notes.length);
+  const hasOther = S.other > 0, hasNotes = false; // poznámky do podkladu pro účetní nepatří (svátky jsou poznat podle barvy řádku)
   // sloupce A–R jako předloha; S (jiná překážka) a T (poznámka) jen když jsou potřeba
   const lastCol = hasNotes ? 'T' : hasOther ? 'S' : 'R';
   const ALL = 'ABCDEFGHIJKLMNOPQRST';
