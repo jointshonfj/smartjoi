@@ -160,6 +160,14 @@ export function addAttendanceSheet(wb, comp, emp, sheetName) {
   return ws;
 }
 
+// sešit jako data (pro přílohu e-mailu)
+export async function workbookBuffer(build) {
+  const ExcelJS = await loadExcelJS();
+  const wb = new ExcelJS.Workbook(); wb.creator = 'SmartJoi · DocházkoBot'; wb.created = new Date();
+  wb.calcProperties.fullCalcOnLoad = true;
+  build(wb);
+  return new Uint8Array(await wb.xlsx.writeBuffer());
+}
 export async function downloadWorkbook(fileName, build) {
   const ExcelJS = await loadExcelJS();
   const wb = new ExcelJS.Workbook(); wb.creator = 'SmartJoi · DocházkoBot'; wb.created = new Date();

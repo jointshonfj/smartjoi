@@ -1,9 +1,9 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261006d';
-import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261006d';
-import * as SU from './stockupdate-core.js?v=20261006d';
+import * as DC from './dochazka-core.js?v=20261006f';
+import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261006f';
+import * as SU from './stockupdate-core.js?v=20261006f';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -113,7 +113,7 @@ async function loadState() {
   const products = {};
   for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name, nameEn: p.name_en || '', nameEnSrc: p.name_en_src || '', mpn: p.mpn || '', shoptetSupplier: p.shoptet_supplier || '' };
   S = {
-    settings: { csvUrl: st.csv_url, statusValue: st.status_value, mapping: st.mapping || {}, companyName: st.company_name, subjectTemplate: st.subject_template, extraNote: st.extra_note, signature: st.signature, productsCsvUrl: st.products_csv_url || '', productsSyncInfo: st.products_sync_info || {}, deeplKey: st.deepl_api_key || '', translateInfo: st.translate_info || {}, calendarToken: st.calendar_token || '', warehouseMsg: st.warehouse_msg || {} },
+    settings: { csvUrl: st.csv_url, statusValue: st.status_value, mapping: st.mapping || {}, companyName: st.company_name, subjectTemplate: st.subject_template, extraNote: st.extra_note, signature: st.signature, productsCsvUrl: st.products_csv_url || '', productsSyncInfo: st.products_sync_info || {}, deeplKey: st.deepl_api_key || '', translateInfo: st.translate_info || {}, calendarToken: st.calendar_token || '', warehouseMsg: st.warehouse_msg || {}, attEmail: st.att_email || {} },
     suppliers: sups.map(s => ({ id: s.id, name: s.name, country: s.country, email: s.email, contact: s.contact, customerNo: s.customer_no, notes: s.notes })),
     products,
     orders: orders.map(o => ({ code: o.code, date: o.order_date, customer: o.customer, shoptetStatus: o.shoptet_status, active: o.active, note: o.note || '', archived: o.archived, manual: !!o.manual })),
@@ -629,14 +629,99 @@ function attOverview(emps, month) {
       <div class="stat"><div class="v">${hh(rows.reduce((t, x) => t + (x.c?.sum.vac || 0), 0))}</div><div class="l">dovolená celkem (h)</div></div>
     </div>
     <div class="card" style="padding:4px 0"><div class="table-wrap"><table class="att-over">
-      <thead><tr><th>Zaměstnanec</th><th class="hide-m">Oddělení</th><th>Stav</th><th class="num">Odpracováno</th><th class="num">Přesčas</th><th class="num hide-m">Dovolená</th><th class="num hide-m">Nemoc</th><th class="num hide-m">Lékař</th><th class="num">Chybí</th></tr></thead>
+      <thead><tr><th style="width:28px"><input type="checkbox" id="asel-all" title="Vybrat všechny s docházkou" ${rows.filter(x => x.c).every(x => attSelected(month).has(x.e.id)) && rows.some(x => x.c) ? 'checked' : ''}></th><th>Zaměstnanec</th><th class="hide-m">Oddělení</th><th>Stav</th><th class="num">Odpracováno</th><th class="num">Přesčas</th><th class="num hide-m">Dovolená</th><th class="num hide-m">Nemoc</th><th class="num hide-m">Lékař</th><th class="num">Chybí</th></tr></thead>
       <tbody>${rows.map(({ e, r, c }) => `<tr data-aemp="${e.id}">
-        <td><b>${esc(e.name)}</b></td><td class="hide-m small">${esc(e.department || '—')}</td>
+        <td class="asel"><input type="checkbox" data-asel="${e.id}" ${attSelected(month).has(e.id) ? 'checked' : ''} ${c ? '' : 'disabled'} title="Do e-mailu a Excelu pro účetní"></td><td><b>${esc(e.name)}</b></td><td class="hide-m small">${esc(e.department || '—')}</td>
         <td>${!c ? '<span class="badge">nenahráno</span>' : r?.status === 'done' ? '<span class="badge ok">hotovo</span>' : !r ? '<span class="badge info">⚡ automaticky</span>' : '<span class="badge info">rozpracováno</span>'}</td>
         ${c ? `<td class="num">${hh(c.sum.worked)}</td><td class="num">${hh(c.sum.over)}</td><td class="num hide-m">${hh(c.sum.vac)}</td><td class="num hide-m">${hh(c.sum.sick)}</td><td class="num hide-m">${hh(c.sum.doc)}</td><td class="num ${c.sum.missing ? 'neg' : ''}">${hh(c.sum.missing)}</td>` : '<td colspan="6" class="muted small">—</td>'}
       </tr>`).join('')}</tbody></table></div></div>
     ${(() => { const hid = S.att.employees.filter(e => !e.active); return hid.length ? `<div class="small muted" style="margin:-4px 2px 14px">Skrytí (zpracovávají se zvlášť): ${hid.map(e => `${esc(e.name)} <button class="btn sm ghost" data-ashow="${e.id}" style="padding:2px 8px">zobrazit</button>`).join(' · ')}</div>` : ''; })()}
+    ${attEmailCard(month)}
     ${attMemoryCard()}`;
+}
+// ---- e-mail pro účetní (šablona v settings.att_email, vybraní zaměstnanci za měsíc) ----
+const ATT_EMAIL_DEF = { to: '', cc: '', subject: 'Docházka – {mesic}', body: 'Dobrý den,\n\nv příloze posílám evidenci pracovní doby za {mesic}.\n\nDěkuji a přeji hezký den.\nS pozdravem\nFilip' };
+const attEmailTpl = () => ({ ...ATT_EMAIL_DEF, ...(S.settings.attEmail || {}) });
+ui.attSel ||= {};
+function attSelected(month) {
+  if (!ui.attSel[month]) ui.attSel[month] = new Set(S.att.employees.filter(e => e.active && attComp(e, month)).map(e => e.id));
+  return ui.attSel[month];
+}
+function attEmailFill(t, month) {
+  const sel = S.att.employees.filter(e => e.active && attSelected(month).has(e.id)).map(e => ({ e, c: attComp(e, month) })).filter(x => x.c);
+  const vars = { mesic: monthLabel(month), zamestnanci: sel.map(x => x.e.name).join('\n'), pocet: String(sel.length), jmena: sel.map(x => x.e.name).join(', ') };
+  const f = x => String(x || '').replace(/\{(mesic|zamestnanci|pocet|jmena)\}/g, (_, k) => vars[k]);
+  return { to: f(t.to), cc: f(t.cc), subject: f(t.subject), body: f(t.body), count: sel.length, sel };
+}
+// přílohy: Excel pro každého zakliknutého zvlášť
+async function attEmailFiles(month, sel) {
+  const out = [];
+  for (const { e, c } of sel) out.push({ name: fileSafe(`Evidence pracovni doby ${e.name} ${month}`) + '.xlsx', data: await workbookBuffer(wb => addAttendanceSheet(wb, c, e, e.name)) });
+  return out;
+}
+// .eml = rozepsaný e-mail (X-Unsent) s přílohami — otevře se v poštovním programu
+const b64u = t => b64(new TextEncoder().encode(t));
+const wrap76 = s => s.replace(/.{76}/g, '$&\r\n');
+const mimeWord = t => /^[\x20-\x7e]*$/.test(t) ? t : `=?UTF-8?B?${b64u(t)}?=`;
+function buildEml(x, files) {
+  const B = 'sj_' + Math.random().toString(36).slice(2);
+  const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const h = [x.to && `To: ${x.to}`, x.cc && `Cc: ${x.cc}`, `Subject: ${mimeWord(x.subject)}`, 'X-Unsent: 1', 'MIME-Version: 1.0', `Content-Type: multipart/mixed; boundary="${B}"`].filter(Boolean);
+  const parts = [`--${B}\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${wrap76(b64u(x.body.replace(/\r?\n/g, '\r\n')))}`,
+    ...files.map(f => `--${B}\r\nContent-Type: ${XLSX}; name="${f.name}"\r\nContent-Disposition: attachment; filename="${f.name}"\r\nContent-Transfer-Encoding: base64\r\n\r\n${wrap76(b64(f.data))}`)];
+  return h.join('\r\n') + '\r\n\r\n' + parts.join('\r\n') + `\r\n--${B}--\r\n`;
+}
+function attEmailCard(month) {
+  const t = attEmailTpl(), x = attEmailFill(t, month);
+  return `<div class="card" id="att-email">
+    <div class="card-head"><div><h2>E-mail pro účetní</h2><div class="sub">Šablona se ukládá sama. V příloze bude Excel za každého zakliknutého. Proměnné: <code>{mesic}</code> <code>{jmena}</code> <code>{pocet}</code></div></div>
+      <span class="badge ${x.count ? 'info' : ''}">${plural(x.count, 'zaměstnanec', 'zaměstnanci', 'zaměstnanců')} · ${esc(monthLabel(month))}</span></div>
+    <div class="grid-2"><label class="field"><span>Komu</span><input type="text" data-aem="to" value="${esc(t.to)}" placeholder="ucetni@firma.cz"></label><label class="field"><span>Kopie</span><input type="text" data-aem="cc" value="${esc(t.cc)}" placeholder="volitelné"></label></div>
+    <label class="field" style="margin-top:10px"><span>Předmět</span><input type="text" data-aem="subject" value="${esc(t.subject)}"></label>
+    <label class="field" style="margin-top:10px"><span>Text</span><textarea data-aem="body" rows="11">${esc(t.body)}</textarea></label>
+    <div class="small muted" style="margin:10px 0 4px">Náhled · přílohy: ${x.sel.map(s => `<span class="chip" style="padding:2px 8px;font-size:12px">📎 ${esc(fileSafe(`Evidence pracovni doby ${s.e.name} ${month}`))}.xlsx</span>`).join(' ') || '—'}</div>
+    <div class="att-mail-prev"><div class="small"><b>Komu:</b> <span id="aem-to">${esc(x.to || '—')}${x.cc ? ` · Kopie: ${esc(x.cc)}` : ''}</span></div><div class="small"><b>Předmět:</b> <span id="aem-subj">${esc(x.subject)}</span></div><pre id="aem-body">${esc(x.body)}</pre></div>
+    <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:10px">
+      <button class="btn primary" id="aem-open" ${x.count ? '' : 'disabled'}>✉ Otevřít v e-mailu (${plural(x.count, 'příloha', 'přílohy', 'příloh')})</button>
+      ${navigator.canShare ? `<button class="btn" id="aem-share" ${x.count ? '' : 'disabled'} title="Sdílet přílohy do Mailu (Mac, iPhone)">Sdílet do Mailu</button>` : ''}
+      <button class="btn ghost" id="aem-xlsx" ${x.count ? '' : 'disabled'}>⬇ Jen Excely</button>
+      <button class="btn ghost sm" id="aem-reset" title="Vrátit výchozí text šablony">Výchozí šablona</button>
+    </div>
+    <div class="small muted" style="margin-top:6px">„Otevřít v e-mailu“ stáhne připravený e-mail (.eml) s přílohami — otevři ho a v Outlooku je rovnou k odeslání (v Apple Mailu: Zpráva → Poslat znovu). „Sdílet do Mailu“ vloží přílohy do nového e-mailu přímo.</div>
+  </div>`;
+}
+function bindAttEmail(month) {
+  if (!$('#att-email')) return;
+  let tmr = null;
+  const read = () => { const o = { ...attEmailTpl() }; document.querySelectorAll('[data-aem]').forEach(i => { o[i.dataset.aem] = i.value; }); return o; };
+  const upd = () => { const x = attEmailFill(read(), month); $('#aem-to').textContent = (x.to || '—') + (x.cc ? ' · Kopie: ' + x.cc : ''); $('#aem-subj').textContent = x.subject; $('#aem-body').textContent = x.body; };
+  const save = () => { const o = read(); S.settings.attEmail = o; sb.from('settings').update({ att_email: o }).eq('id', 1).then(({ error }) => error ? toast('Šablonu se nepodařilo uložit: ' + error.message) : null, () => toast('Šablonu se nepodařilo uložit')); };
+  document.querySelectorAll('[data-aem]').forEach(i => { i.oninput = () => { upd(); clearTimeout(tmr); tmr = setTimeout(save, 600); }; i.onblur = () => { clearTimeout(tmr); save(); }; });
+  $('#aem-open').onclick = async () => {
+    const x = attEmailFill(read(), month); if (!x.to.trim()) toast('Doplň příjemce (Komu)');
+    try {
+      const eml = buildEml(x, await attEmailFiles(month, x.sel));
+      const url = URL.createObjectURL(new Blob([eml], { type: 'message/rfc822' }));
+      const a = document.createElement('a'); a.href = url; a.download = fileSafe(`Dochazka ${month}`) + '.eml'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+      toast('E-mail připraven — otevři stažený soubor');
+    } catch (e) { toast('Chyba: ' + e.message); console.error(e); }
+  };
+  // sdílení musí proběhnout hned po kliknutí → přílohy se připraví dopředu
+  const selKey = month + '|' + [...attSelected(month)].sort().join(',');
+  if ($('#aem-share') && attEmailFill(read(), month).count && ui.attShare?.key !== selKey) { ui.attShare = { key: selKey, files: null }; attEmailFiles(month, attEmailFill(read(), month).sel).then(f => { if (ui.attShare?.key === selKey) ui.attShare.files = f; }, () => {}); }
+  if ($('#aem-share')) $('#aem-share').onclick = async () => {
+    const x = attEmailFill(read(), month);
+    try {
+      const ready = ui.attShare?.key === selKey && ui.attShare.files;
+      if (!ready) return toast('Přílohy se ještě připravují — zkus to za vteřinu');
+      const files = ready.map(f => new File([f.data], f.name, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+      if (!navigator.canShare({ files })) return toast('Tenhle prohlížeč neumí sdílet soubory — použij „Otevřít v e-mailu“');
+      await navigator.share({ files, title: x.subject, text: x.body });
+      if (x.to) copyText(x.to);
+    } catch (e) { if (e.name !== 'AbortError') toast('Chyba: ' + e.message); }
+  };
+  $('#aem-reset').onclick = () => { if (!confirm('Vrátit předmět a text na výchozí? Příjemci zůstanou.')) return; const o = { ...read(), subject: ATT_EMAIL_DEF.subject, body: ATT_EMAIL_DEF.body }; S.settings.attEmail = o; sb.from('settings').update({ att_email: o }).eq('id', 1).then(() => {}, () => {}); render(); };
+  $('#aem-xlsx').onclick = async () => { try { for (const f of await attEmailFiles(month, attEmailFill(read(), month).sel)) { const url = URL.createObjectURL(new Blob([f.data])); const a = document.createElement('a'); a.href = url; a.download = f.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000); await new Promise(r => setTimeout(r, 300)); } } catch (e) { toast('Chyba: ' + e.message); } };
 }
 function attMemoryCard() {
   const mem = S.att.memory;
@@ -703,7 +788,10 @@ function bindAtt(emp, month) {
   V.querySelectorAll('[data-amon]').forEach(b => b.onclick = () => { const [y, m] = month.split('-').map(Number); const d = new Date(y, m - 1 + Number(b.dataset.amon), 1); ui.attMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; render(); });
   $('#att-all').onclick = () => attExportAll(month);
   V.querySelectorAll('[data-atab]').forEach(b => b.onclick = () => { location.hash = '#/dochazka' + (b.dataset.atab ? '/' + b.dataset.atab : ''); });
-  V.querySelectorAll('tr[data-aemp]').forEach(tr => tr.onclick = () => { location.hash = '#/dochazka/' + tr.dataset.aemp; });
+  V.querySelectorAll('tr[data-aemp]').forEach(tr => tr.onclick = e => { if (e.target.closest('.asel')) return; location.hash = '#/dochazka/' + tr.dataset.aemp; });
+  V.querySelectorAll('[data-asel]').forEach(cb => cb.onchange = () => { const s = attSelected(month); cb.checked ? s.add(cb.dataset.asel) : s.delete(cb.dataset.asel); render(); });
+  if ($('#asel-all')) $('#asel-all').onchange = e => { const s = attSelected(month); for (const x of S.att.employees.filter(x => x.active && attComp(x, month))) e.target.checked ? s.add(x.id) : s.delete(x.id); render(); };
+  bindAttEmail(month);
   if ($('#mem-add')) $('#mem-add').onclick = () => { const t = prompt('Nové pravidlo pro SmartJoiAI (docházka):'); if (t?.trim()) act(async () => ok(await sb.from('ai_memory').insert({ scope: 'dochazka', text: t.trim() })), 'Uloženo ✓'); };
   V.querySelectorAll('[data-memdel]').forEach(b => b.onclick = () => { if (confirm('Zapomenout tohle pravidlo?')) act(async () => ok(await sb.from('ai_memory').delete().eq('id', b.dataset.memdel)), 'Zapomenuto'); });
   V.querySelectorAll('[data-ashow]').forEach(b => b.onclick = () => act(async () => ok(await sb.from('att_employees').update({ active: true }).eq('id', b.dataset.ashow)), 'Zobrazeno ✓'));
@@ -902,7 +990,13 @@ function editAttEmployee(id) {
     closeModal(); act(async () => ok(await sb.from('att_employees').update(row).eq('id', id)), 'Uloženo ✓');
   };
 }
-async function attExportAll(month) {
+async function attExportAll(month, only) {
+  if (only) {
+    const list = S.att.employees.filter(e => e.active && only.has(e.id)).map(e => ({ e, c: attComp(e, month) })).filter(x => x.c);
+    if (!list.length) return toast('Nikdo není vybraný');
+    try { await downloadWorkbook(fileSafe(`Evidence pracovni doby ${month}`) + '.xlsx', wb => { for (const { e, c } of list) addAttendanceSheet(wb, c, e, e.name); }); toast('Excel stažen ✓'); } catch (e) { toast('Chyba: ' + e.message); }
+    return;
+  }
   const list = S.att.employees.filter(e => e.active).map(e => ({ e, c: attComp(e, month) })).filter(x => x.c);
   if (!list.length) return toast('Za tento měsíc zatím nikdo nemá nahranou docházku');
   const missing = S.att.employees.filter(e => e.active && !attComp(e, month)).map(e => e.name);
