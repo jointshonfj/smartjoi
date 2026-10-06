@@ -404,3 +404,27 @@ table.su th.r, table.su td.r { text-align: right; font-variant-numeric: tabular-
 table.su td { vertical-align: top; }
 table.su tr.su-bad td { background: color-mix(in srgb, var(--warn) 7%, transparent); }
 @media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
+.su-list { border-top: 1px solid var(--line); padding: 14px 0 6px; }
+.su-list:first-of-type { border-top: 0; }
+.su-list-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.su-up { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.su-file { flex: 1 1 220px; padding: 14px; border: 2px dashed var(--line-2); border-radius: 10px; text-align: center; cursor: pointer; font-weight: 600; font-size: 14px; }
+.su-file:hover, .su-file.over { border-color: var(--hover-border); background: var(--hover); }
+.su-file.done { border-style: solid; color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.su-sum { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 8px; }
+.su-sum > div { background: var(--chip); border-radius: 10px; padding: 10px 12px; }
+.su-sum b { display: block; font-size: 20px; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.su-sum > div > span { font-size: 12px; color: var(--muted); font-weight: 600; }
+.su-detail { margin-top: 12px; }
+.su-issues { border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+.su-issue { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.su-issue select { max-width: 100%; }
+.su-sect { margin-bottom: 10px; }
+.su-sect-h { font-weight: 700; margin: 8px 0 2px; text-transform: capitalize; }
+table.su-c th.r, table.su-c td.r, table.su-hist td.r { text-align: right; font-variant-numeric: tabular-nums; }
+table.su-c td { vertical-align: top; }
+.su-d { display: inline-block; margin-left: 4px; font-size: 12px; font-weight: 700; }
+.su-d.up { color: var(--ok); } .su-d.down { color: var(--bad); }
+table.su-hist tbody tr { cursor: pointer; }
+table.su-hist tbody tr:hover td, table.su-hist tbody tr.on td { background: var(--hover); }
+@media (max-width: 700px) { .su-sum { grid-template-columns: 1fr 1fr; } }
