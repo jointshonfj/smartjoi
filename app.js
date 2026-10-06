@@ -1,9 +1,9 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261006a';
-import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261006a';
-import * as SU from './stockupdate-core.js?v=20261006a';
+import * as DC from './dochazka-core.js?v=20261006b';
+import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261006b';
+import * as SU from './stockupdate-core.js?v=20261006b';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -272,8 +272,8 @@ function renderHub() {
       <a class="app-card" href="#/stockupdate">
         <div class="row"><div class="app-icon">🔄</div><span class="num grow" style="text-align:right">05</span></div>
         <h3>StockUpdate 1.0</h3>
-        <p>Sklad dodavatele z PDF → import skladu do Shoptetu (s rezervou). Teď: Gunreben WPC prkna.</p>
-        <div class="badge-row">${(() => { const c = S.su[0]; const lr = c?.last_run; return lr ? `<span class="badge">naposledy ${esc(fmtDate(lr.at, false))}</span><span class="badge info">${plural(lr.rows || 0, 'varianta', 'varianty', 'variant')}</span>` : `<span class="badge">zatím nespuštěno</span>`; })()}</div>
+        <p>Sklad dodavatele z PDF → import skladu do Shoptetu (s rezervou). Gunreben: WPC prkna a vinyl.</p>
+        <div class="badge-row">${(() => { const lr = S.su.map(x => x.last_run).filter(Boolean).sort((x, y) => String(y.at).localeCompare(String(x.at)))[0]; return lr ? `<span class="badge">naposledy ${esc(fmtDate(lr.at, false))}</span><span class="badge info">${plural(lr.rows || 0, 'varianta', 'varianty', 'variant')}</span>` : `<span class="badge">zatím nespuštěno</span>`; })()}</div>
       </a>
       <a class="app-card" href="#/kalendar">
         <div class="row"><div class="app-icon">📅</div><span class="num grow" style="text-align:right">SmartJoi</span></div>
@@ -360,6 +360,7 @@ async function pdfToText(buf) {
 // ---------- APLIKACE 05: STOCKUPDATE ----------
 // PDF se skladem dodavatele + CSV export ze Shoptetu → CSV pro import skladu do Shoptetu (sklad dodavatele mínus rezerva)
 const su = { cfgId: 'gunreben-wpc', pdf: null, csv: null, filter: 'all' };
+const suNum = v => v == null ? '' : Number(v).toLocaleString('cs-CZ', { maximumFractionDigits: 3 });
 const suCfg = () => S.su.find(c => c.id === su.cfgId) || { id: su.cfgId, supplier: 'Gunreben', label: 'WPC prkna', reserve: 30, stock_col: 'stock:Extérní sklad', mappings: {} };
 async function pdfItems(buf) {
   const lib = await pdfLib(); const doc = await lib.getDocument({ data: new Uint8Array(buf) }).promise; const pages = [];
@@ -394,8 +395,9 @@ const SU_STATUS = { ok: ['ok', ''], nomap: ['warn', 'chybí kód dodavatele'], n
 function renderSuApp() {
   const c = suCfg(), res = suResult();
   const supCodes = su.pdf ? Object.keys(su.pdf.stock).sort() : [];
-  const sample = code => Object.entries(su.pdf.stock[code] || {}).map(([l, q]) => `${l.replace('.', ',')}: ${q}`).join(' · ');
+  const sample = code => { const inf = su.pdf.info?.[code]; if (inf) return `${inf.desc.split('|')[0].trim()} · ${suNum(inf.packs)} bal. · ${suNum(inf.qty)} m²`; return Object.entries(su.pdf.stock[code] || {}).map(([l, q]) => `${l.replace('.', ',')}: ${q}`).join(' · '); };
   let h = `
+    <div class="chips" style="margin-bottom:12px">${S.su.map(x => `<button class="chip ${x.id === su.cfgId ? 'on' : ''}" data-sucfg="${esc(x.id)}">${esc(x.supplier)} · ${esc(x.label)}</button>`).join('')}</div>
     <div class="page-head"><div><div class="eyebrow">Aplikace 05</div><h1>StockUpdate 1.0</h1><div class="sub">${esc(c.supplier)} · ${esc(c.label)} — sklad dodavatele z PDF → import skladu do Shoptetu</div></div>
       <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end">
         <label class="field" style="margin:0"><span>Rezerva</span><select id="su-res">${[0, 10, 20, 25, 30, 40, 50].map(v => `<option value="${v}" ${+c.reserve === v ? 'selected' : ''}>${v} %</option>`).join('')}</select></label>
@@ -403,8 +405,8 @@ function renderSuApp() {
       </div></div>
     <div class="grid-2">
       <div class="card"><h3>1 · Sklad dodavatele (PDF)</h3>
-        ${su.pdf ? `<div class="small"><b>${esc(su.pdf.name)}</b><br>${su.pdf.updated ? `aktualizace u dodavatele ${esc(su.pdf.updated)} · ` : ''}${plural(Object.keys(su.pdf.stock).length, 'artikl', 'artikly', 'artiklů')}</div>` : ''}
-        <label class="imp-drop" id="su-drop-pdf" style="margin-top:8px"><input type="file" accept=".pdf" hidden><b>${su.pdf ? 'Nahrát jiné PDF' : 'Nahrát PDF'}</b><span class="small muted">G2 Terrassen-Lagerliste od Gunrebenu</span></label></div>
+        ${su.pdf ? `<div class="small"><b>${esc(su.pdf.name)}</b><br>${su.pdf.updated ? `aktualizace u dodavatele ${esc(su.pdf.updated)} · ` : ''}${plural(Object.keys(su.pdf.stock).length, 'artikl', 'artikly', 'artiklů')}${su.pdf.format === 'list' ? ' · seznam (balení / m²)' : ' · podle délek'}</div>` : ''}
+        <label class="imp-drop" id="su-drop-pdf" style="margin-top:8px"><input type="file" accept=".pdf" hidden><b>${su.pdf ? 'Nahrát jiné PDF' : 'Nahrát PDF'}</b><span class="small muted">${su.cfgId === 'gunreben-vinyl' ? 'Stock list vinyl od Gunrebenu' : 'G2 Terrassen-Lagerliste od Gunrebenu'}</span></label></div>
       <div class="card"><h3>2 · Produkty ze Shoptetu (CSV)</h3>
         ${su.csv ? `<div class="small"><b>${esc(su.csv.name)}</b><br>${plural(su.csv.rows.length, 'varianta', 'varianty', 'variant')}</div>` : ''}
         <label class="imp-drop" id="su-drop-csv" style="margin-top:8px"><input type="file" accept=".csv" hidden><b>${su.csv ? 'Nahrát jiné CSV' : 'Nahrát CSV'}</b><span class="small muted">Export produktů (kód, partNumber, varianta s délkou, sklady)</span></label></div>
@@ -417,27 +419,27 @@ function renderSuApp() {
   const changed = okR.filter(r => r.change !== 0);
   const shown = su.filter === 'issues' ? bad : su.filter === 'changed' ? changed : rows;
   // skupiny bez kódu dodavatele → ruční přiřazení
-  const groups = [...new Map(rows.filter(r => r.status === 'nomap' || r.status === 'nocode' || r.mapped === 'ručně').map(r => [r.group, r])).values()];
+  const groups = [...new Map(rows.filter(r => r.status === 'nomap' || r.status === 'nocode' || r.mapped === 'ručně' || r.mapped === 'podle názvu' || r.warn).map(r => [r.group, r])).values()];
   h += `
     <div class="stats">
       <div class="stat"><div class="v">${okR.length}</div><div class="l">variant do importu</div></div>
       <div class="stat"><div class="v">${changed.length}</div><div class="l">se změnou skladu</div></div>
-      <div class="stat"><div class="v">${okR.reduce((t, r) => t + r.next, 0).toLocaleString('cs-CZ')}</div><div class="l">ks celkem po rezervě ${+c.reserve} %</div></div>
+      <div class="stat"><div class="v">${suNum(Math.round(okR.reduce((t, r) => t + r.next, 0)))}</div><div class="l">${su.pdf.format === 'list' ? 'm²' : 'ks'} celkem po rezervě ${+c.reserve} %</div></div>
       <div class="stat"><div class="v" style="${bad.length ? 'color:var(--bad)' : ''}">${bad.length}</div><div class="l">bez párování (nepůjde do importu)</div></div>
     </div>
-    ${groups.length ? `<div class="card"><h3>Přiřazení kódu dodavatele</h3><div class="small muted" style="margin-bottom:8px">Produkty bez <code>partNumber</code> v Shoptetu (nebo s kódem, který v listině není). Vyber artikl z listiny — uloží se pro příště. Trvalejší je doplnit partNumber přímo v Shoptetu.</div>
+    ${groups.length ? `<div class="card"><h3>Přiřazení kódu dodavatele</h3><div class="small muted" style="margin-bottom:8px">Produkty bez <code>partNumber</code> v Shoptetu, s kódem, který v listině není, nebo s kódem, který nesedí k názvu (pak se použije artikl podle názvu). Zkontroluj, případně vyber jiný artikl — uloží se pro příště. Trvalejší je opravit partNumber přímo v Shoptetu.</div>
       ${groups.map(g => `<div class="row" style="gap:10px;flex-wrap:wrap;margin:6px 0"><span class="grow"><b>${esc(g.name)}</b> <span class="muted small">${esc(g.code)}${g.supplierCode ? ' · ' + esc(g.supplierCode) : ''}</span></span>
-        <select data-sumap="${esc(g.group)}" style="max-width:100%"><option value="">— vyber artikl —</option>${supCodes.map(k => `<option value="${k}" ${c.mappings[g.group] === k ? 'selected' : ''}>${k} · ${esc(sample(k))}</option>`).join('')}</select></div>`).join('')}</div>` : ''}
+        <select data-sumap="${esc(g.group)}" style="max-width:100%"><option value="">${g.supplierCode && g.mapped !== 'ručně' ? `automaticky: ${esc(g.supplierCode)} · ${esc(sample(g.supplierCode))}` : '— vyber artikl —'}</option>${supCodes.map(k => `<option value="${k}" ${c.mappings[g.group] === k ? 'selected' : ''}>${k} · ${esc(sample(k))}</option>`).join('')}</select></div>`).join('')}</div>` : ''}
     <div class="card">
       <div class="card-head"><div class="chips">${[['all', `Vše ${rows.length}`], ['changed', `Změna ${changed.length}`], ['issues', `Problémy ${bad.length}`]].map(([k, l]) => `<button class="chip ${su.filter === k ? 'on' : ''}" data-suf="${k}">${l}</button>`).join('')}</div>
         <button class="btn primary" id="su-dl" ${okR.length ? '' : 'disabled'}>⬇ CSV pro Shoptet (${okR.length})</button></div>
       <div class="table-wrap"><table class="su"><thead><tr><th>Kód</th><th>Produkt</th><th>Délka</th><th>Artikl dodavatele</th><th class="r">U dodavatele</th><th class="r">Do Shoptetu</th><th class="r">Teď</th><th class="r">Změna</th></tr></thead><tbody>
-      ${shown.map(r => { const [cls, txt] = SU_STATUS[r.status]; return `<tr class="${r.status !== 'ok' ? 'su-bad' : ''}"><td><b>${esc(r.code)}</b></td><td>${esc(r.name)}</td><td>${r.length ? esc(r.length.replace('.', ',')) + ' m' : '—'}</td>
-        <td>${esc(r.supplierCode || '—')}${r.mapped && r.mapped !== 'partNumber' ? ` <span class="muted small">(${esc(r.mapped)})</span>` : ''}${txt ? ` <span class="badge ${cls}">${txt}</span>` : ''}</td>
-        <td class="r">${r.supplierQty ?? ''}</td><td class="r"><b>${r.next ?? ''}</b></td><td class="r muted">${r.current ?? ''}</td>
-        <td class="r">${r.change == null ? '' : r.change === 0 ? '<span class="muted">0</span>' : `<span style="color:var(${r.change > 0 ? '--ok' : '--bad'})">${r.change > 0 ? '+' : ''}${r.change}</span>`}</td></tr>`; }).join('')}
+      ${shown.map(r => { const [cls, txt] = SU_STATUS[r.status]; return `<tr class="${r.status !== 'ok' ? 'su-bad' : ''}"><td><b>${esc(r.code)}</b></td><td>${esc(r.name)}</td><td>${r.length ? esc(r.length.replace('.', ',')) + ' m' : r.supplierPacks != null ? '<span class="muted">—</span>' : '—'}</td>
+        <td>${esc(r.supplierCode || '—')}${r.mapped && r.mapped !== 'partNumber' ? ` <span class="muted small">(${esc(r.mapped)})</span>` : ''}${txt ? ` <span class="badge ${cls}">${txt}</span>` : ''}${r.desc ? `<div class="muted small">${esc(r.desc.split('|')[0].trim())}</div>` : ''}${r.warn ? `<div class="small" style="color:var(--warn)">⚠ ${esc(r.warn)}</div>` : ''}</td>
+        <td class="r">${suNum(r.supplierQty)}${r.supplierPacks != null ? `<div class="muted small">${suNum(r.supplierPacks)} bal.</div>` : ''}</td><td class="r"><b>${suNum(r.next)}</b></td><td class="r muted">${suNum(r.current)}</td>
+        <td class="r">${r.change == null ? '' : r.change === 0 ? '<span class="muted">0</span>' : `<span style="color:var(${r.change > 0 ? '--ok' : '--bad'})">${r.change > 0 ? '+' : ''}${suNum(r.change)}</span>`}</td></tr>`; }).join('')}
       </tbody></table></div>
-      <div class="small muted" style="margin-top:10px">Import v Shoptetu: Produkty → Import → vyber stažené CSV (kódování UTF-8, oddělovač středník). Soubor obsahuje jen <code>code</code>, <code>pairCode</code> a <code>${esc(res.col)}</code>, nic jiného se nezmění. Když délka v listině dodavatele chybí, bere se 0 ks.</div>
+      <div class="small muted" style="margin-top:10px">Import v Shoptetu: Produkty → Import → vyber stažené CSV (kódování UTF-8, oddělovač středník). Soubor obsahuje jen <code>code</code>, <code>pairCode</code> a <code>${esc(res.col)}</code>, nic jiného se nezmění. ${su.pdf.format === 'list' ? `Vinyl: rezerva se počítá z celých balení (dolů) a do Shoptetu jde plocha těchto balení v m²; záporný sklad u dodavatele = 0.` : 'Když délka v listině dodavatele chybí, bere se 0 ks.'}</div>
     </div>`;
   $('#view').innerHTML = h; suBind();
 }
@@ -454,6 +456,7 @@ function suBind() {
   if ($('#su-col')) $('#su-col').onchange = e => save({ stock_col: e.target.value });
   document.querySelectorAll('[data-sumap]').forEach(sel => sel.onchange = () => { const m = { ...suCfg().mappings }; if (sel.value) m[sel.dataset.sumap] = sel.value; else delete m[sel.dataset.sumap]; save({ mappings: m }); });
   document.querySelectorAll('[data-suf]').forEach(b => b.onclick = () => { su.filter = b.dataset.suf; render(); });
+  document.querySelectorAll('[data-sucfg]').forEach(b => b.onclick = () => { if (su.cfgId !== b.dataset.sucfg) { su.cfgId = b.dataset.sucfg; su.pdf = null; su.csv = null; su.filter = 'all'; render(); } });
   if ($('#su-dl')) $('#su-dl').onclick = async () => {
     const res = suResult(); const okR = res.rows.filter(r => r.status === 'ok');
     const blob = new Blob([SU.exportRows(res.rows, res.col)], { type: 'text/csv;charset=utf-8' });

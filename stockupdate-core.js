@@ -47,7 +47,35 @@ export function parseSupplierStock(pages) {
       }
     }
   }
-  return { stock, updated, pairs, unassigned };
+  // druhý formát: seznam „Nr. | Beschreibung | Beschreibung 2 | packs available | quantity available“ (vinyl)
+  const list = parseStockList(pages);
+  for (const [code, v] of Object.entries(list.stock)) if (!stock[code]) stock[code] = v;
+  return { stock, updated, pairs: pairs + list.rows, unassigned, info: list.info, format: list.rows > pairs ? 'list' : 'lengths' };
+}
+
+// seznam: kód | popis | balení | množství (m²) — sklad bez délek, klíč 'all'
+const SNUM_RE = /^-?\d+(?:\.\d{3})*,\d{2}$/;
+export function parseStockList(pages) {
+  const stock = {}, info = {}; let rows = 0;
+  for (const raw of pages) {
+    const items = raw.map(i => ({ ...i, s: String(i.s).trim() })).filter(i => i.s);
+    const lines = [];
+    for (const it of [...items].sort((a, b) => b.y - a.y || a.x - b.x)) {
+      const r = lines.find(r => Math.abs(r.y - it.y) <= 2);
+      if (r) r.items.push(it); else lines.push({ y: it.y, items: [it] });
+    }
+    for (const l of lines) {
+      const c = l.items.sort((a, b) => a.x - b.x);
+      if (c.length < 4 || !CODE_RE.test(c[0].s)) continue;
+      const q = c[c.length - 1], p = c[c.length - 2];
+      if (!SNUM_RE.test(q.s) || !SNUM_RE.test(p.s)) continue;
+      const packs = czNum(p.s), qty = czNum(q.s);
+      stock[c[0].s] = { all: qty };
+      info[c[0].s] = { desc: c.slice(1, -2).map(x => x.s).join(' | '), packs, qty, perPack: packs > 0 ? qty / packs : null };
+      rows++;
+    }
+  }
+  return { stock, info, rows };
 }
 
 // ---------- CSV (Shoptet export: středník, uvozovky, UTF-8 s BOM) ----------
@@ -80,6 +108,20 @@ export function variantLength(row) {
   return null;
 }
 
+// ---------- párování podle názvu (seznam s popisem, např. „Helios 2,5mm“ ↔ „HELIOS lepený Dub 2,5 mm“) ----------
+const fold = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+const thick = s => { const m = /(\d+[.,]\d+)\s*mm/i.exec(String(s || '')); return m ? Number(m[1].replace(',', '.')) : null; };
+function descMatches(name, desc) {
+  const w = fold(desc).split(/[\s|]+/)[0];
+  if (!w || !new RegExp(`(^|[^a-z])${w}([^a-z]|$)`).test(fold(name))) return false;
+  const a = thick(name), b = thick(desc);
+  return a == null || b == null || a === b;
+}
+export function suggestByName(name, info) {
+  const hit = Object.entries(info || {}).filter(([, v]) => descMatches(name, v.desc)).map(([k]) => k);
+  return hit.length === 1 ? hit[0] : null;
+}
+
 // ---------- návrh nového skladu ----------
 // opts: { reserve: 30 (%), stockCol: 'stock:Extérní sklad', mappings: { pairCode|code: kódDodavatele } }
 export function buildUpdate(csv, supplier, opts = {}) {
@@ -92,13 +134,33 @@ export function buildUpdate(csv, supplier, opts = {}) {
   for (const r of csv.rows) {
     const k = groupKey(r);
     const manual = maps[k] || '';
-    const sc = manual || r.partNumber?.trim() || groupPart[k] || '';
+    let sc = manual || r.partNumber?.trim() || groupPart[k] || '';
+    let byName = false, warn = '';
+    // seznam s popisem: kontrola, že kód sedí k názvu produktu; jinak návrh podle názvu
+    if (!manual && supplier.info && Object.keys(supplier.info).length) {
+      const inf = supplier.info[sc];
+      if (!sc || !inf || !descMatches(r.name, inf.desc)) {
+        const sug = suggestByName(r.name, supplier.info);
+        if (sug) { if (sc && sc !== sug) warn = `partNumber v Shoptetu ${sc}${inf ? ' = ' + inf.desc.split('|')[0].trim() : ''}`; sc = sug; byName = true; }
+        else if (sc && inf) warn = `kód ${sc} = ${inf.desc.split('|')[0].trim()} — nesedí k názvu`;
+      }
+    }
     const len = variantLength(r);
     const cur = r[stockCol] === '' || r[stockCol] == null ? null : Number(String(r[stockCol]).replace(',', '.'));
-    const base = { code: r.code, pairCode: r.pairCode, group: k, name: r.name, length: len, supplierCode: sc, mapped: manual ? 'ručně' : r.partNumber ? 'partNumber' : groupPart[k] ? 'podle varianty' : '', current: cur };
+    const base = { code: r.code, pairCode: r.pairCode, group: k, name: r.name, length: len, supplierCode: sc, mapped: manual ? 'ručně' : byName ? 'podle názvu' : r.partNumber ? 'partNumber' : groupPart[k] ? 'podle varianty' : '', current: cur, warn, desc: supplier.info?.[sc]?.desc || '' };
     if (!sc) { out.push({ ...base, status: 'nomap' }); continue; }
     const st = supplier.stock[sc];
     if (!st) { out.push({ ...base, status: 'nocode' }); continue; }
+    if ('all' in st) {
+      // seznam (vinyl): rezerva se počítá z celých balení, do Shoptetu jde množství (m²) za celá balení
+      const inf = supplier.info?.[sc] || {}, sup = st.all;
+      let next;
+      if (inf.perPack && inf.packs > 0) next = Math.round(Math.floor(inf.packs * (100 - reserve) / 100) * inf.perPack * 1000) / 1000;
+      else next = Math.floor(sup * (100 - reserve) / 100 * 100) / 100;
+      next = Math.max(0, next);
+      out.push({ ...base, status: 'ok', supplierQty: sup, supplierPacks: inf.packs, next, change: cur == null ? null : Math.round((next - cur) * 1000) / 1000 });
+      continue;
+    }
     if (!len) { out.push({ ...base, status: 'nolen' }); continue; }
     const sup = st[len] ?? 0;                                   // délka v listině chybí = dodavatel nemá
     const next = Math.max(0, Math.floor(sup * (100 - reserve) / 100));
