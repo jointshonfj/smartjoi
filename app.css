@@ -398,3 +398,9 @@ table.att-days .raw { font-size: 11px; color: var(--dim); }
 .att-src { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 10px; font-size: 12.5px; cursor: default; }
 .att-src .icon-btn { width: 22px; height: 22px; min-width: 22px; font-size: 11px; border-radius: 6px; }
 .att-src .icon-btn:hover { color: var(--bad); }
+
+/* StockUpdate */
+table.su th.r, table.su td.r { text-align: right; font-variant-numeric: tabular-nums; }
+table.su td { vertical-align: top; }
+table.su tr.su-bad td { background: color-mix(in srgb, var(--warn) 7%, transparent); }
+@media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }

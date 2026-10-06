@@ -1,8 +1,9 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261005h';
-import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261005h';
+import * as DC from './dochazka-core.js?v=20261006a';
+import { addAttendanceSheet, downloadWorkbook } from './dochazka-xlsx.js?v=20261006a';
+import * as SU from './stockupdate-core.js?v=20261006a';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -91,7 +92,7 @@ async function fetchAll(table, build = q => q) {
 }
 async function loadState() {
   const since = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock, attEmps, attMonths, aiMem, attHol] = await Promise.all([
+  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock, attEmps, attMonths, aiMem, attHol, suCfg] = await Promise.all([
     sb.from('settings').select('*').eq('id', 1).single().then(ok),
     fetchAll('suppliers', q => q.order('name')),
     fetchAll('products', q => q.order('code')),
@@ -106,6 +107,7 @@ async function loadState() {
     fetchAll('att_months', q => q.order('month', { ascending: false })),
     fetchAll('ai_memory', q => q.order('created_at')),
     fetchAll('att_holidays', q => q.order('date')).catch(() => []),
+    fetchAll('su_config', q => q.order('id')).catch(() => []),
   ]);
   const products = {};
   for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name, nameEn: p.name_en || '', nameEnSrc: p.name_en_src || '', mpn: p.mpn || '', shoptetSupplier: p.shoptet_supplier || '' };
@@ -125,6 +127,7 @@ async function loadState() {
       memory: aiMem.map(m => ({ id: m.id, scope: m.scope, text: m.text, createdAt: m.created_at })),
       holidays: attHol.map(h => ({ date: String(h.date).slice(0, 10), name: h.name })),
     },
+    su: suCfg.map(c => ({ ...c, reserve: Number(c.reserve), mappings: c.mappings || {} })),
     emails: emails.map(e => ({ id: e.id, title: e.title, category: e.category || '', to: e.to_addr || '', cc: e.cc || '', subject: e.subject || '', body: e.body || '', note: e.note || '', pinned: !!e.pinned, useCount: e.use_count || 0, lastUsed: e.last_used_at, updatedAt: e.updated_at })),
     sync: { fetchedAt: st.last_sync_at, error: st.last_sync_error, errorAt: st.last_sync_error_at, headers: st.sync_headers || [], rowCount: st.sync_row_count, sample: st.sync_sample || [], statuses: st.sync_statuses || {} },
   };
@@ -213,6 +216,7 @@ function render() {
     crumb.innerHTML = `<span>/</span><a href="#/dochazka">DocházkoBot</a>${e ? `<span>/</span><b>${esc(e.name)}</b>` : ''}`;
     return renderAttApp(e ? e.id : '');
   }
+  if (r.app === 'stockupdate') { crumb.innerHTML = `<span>/</span><b>StockUpdate 1.0</b>`; return renderSuApp(); }
   if (r.app === 'sklad') {
     const it = r.tab === 'p' ? stItem(r.id) : null;
     crumb.innerHTML = `<span>/</span><a href="#/sklad">StockJoi</a>${it ? `<span>/</span><b>${esc(it.name)}</b>` : ''}`;
@@ -264,6 +268,12 @@ function renderHub() {
         <p>Docházka zaměstnanců → podklady pro účetní v Excelu. Čte PDF z docházky, pomáhá SmartJoiAI.</p>
         <div class="badge-row">${(() => { const m = ui.attMonth || prevMonth(); const act = S.att.employees.filter(e => e.active); const done = act.filter(e => attRec(e.id, m)?.status === 'done').length, up = act.filter(e => attRec(e.id, m)?.entries.length).length;
           return `<span class="badge">${esc(monthLabel(m))}: ${up}/${act.length} nahráno</span>${done ? `<span class="badge ok">${done} hotovo</span>` : ''}`; })()}</div>
+      </a>
+      <a class="app-card" href="#/stockupdate">
+        <div class="row"><div class="app-icon">🔄</div><span class="num grow" style="text-align:right">05</span></div>
+        <h3>StockUpdate 1.0</h3>
+        <p>Sklad dodavatele z PDF → import skladu do Shoptetu (s rezervou). Teď: Gunreben WPC prkna.</p>
+        <div class="badge-row">${(() => { const c = S.su[0]; const lr = c?.last_run; return lr ? `<span class="badge">naposledy ${esc(fmtDate(lr.at, false))}</span><span class="badge info">${plural(lr.rows || 0, 'varianta', 'varianty', 'variant')}</span>` : `<span class="badge">zatím nespuštěno</span>`; })()}</div>
       </a>
       <a class="app-card" href="#/kalendar">
         <div class="row"><div class="app-icon">📅</div><span class="num grow" style="text-align:right">SmartJoi</span></div>
@@ -346,6 +356,110 @@ async function pdfToText(buf) {
     out += '\n';
   }
   return out;
+}
+// ---------- APLIKACE 05: STOCKUPDATE ----------
+// PDF se skladem dodavatele + CSV export ze Shoptetu → CSV pro import skladu do Shoptetu (sklad dodavatele mínus rezerva)
+const su = { cfgId: 'gunreben-wpc', pdf: null, csv: null, filter: 'all' };
+const suCfg = () => S.su.find(c => c.id === su.cfgId) || { id: su.cfgId, supplier: 'Gunreben', label: 'WPC prkna', reserve: 30, stock_col: 'stock:Extérní sklad', mappings: {} };
+async function pdfItems(buf) {
+  const lib = await pdfLib(); const doc = await lib.getDocument({ data: new Uint8Array(buf) }).promise; const pages = [];
+  for (let i = 1; i <= doc.numPages; i++) { const c = await (await doc.getPage(i)).getTextContent(); pages.push(c.items.filter(it => it.str.trim()).map(it => ({ s: it.str, x: it.transform[4], y: it.transform[5], w: it.width }))); }
+  return pages;
+}
+async function suLoadFiles(files) {
+  for (const f of files) {
+    try {
+      if (/\.pdf$/i.test(f.name)) {
+        const sup = SU.parseSupplierStock(await pdfItems(await f.arrayBuffer()));
+        if (!Object.keys(sup.stock).length) throw new Error('V PDF jsem nenašel žádné kódy artiklů se skladem');
+        su.pdf = { name: f.name, ...sup }; toast(`Sklad dodavatele: ${Object.keys(sup.stock).length} artiklů ✓`);
+      } else if (/\.csv$/i.test(f.name)) {
+        const buf = await f.arrayBuffer(); let text = new TextDecoder('utf-8').decode(buf);
+        if (text.includes('�')) text = new TextDecoder('windows-1250').decode(buf);
+        const csv = SU.parseCsv(text);
+        if (!csv.head.includes('code')) throw new Error('V CSV chybí sloupec „code“ — je to export produktů ze Shoptetu?');
+        su.csv = { name: f.name, ...csv }; toast(`Shoptet: ${csv.rows.length} variant ✓`);
+      } else toast('Nahraj PDF od dodavatele nebo CSV ze Shoptetu');
+    } catch (e) { toast('Chyba: ' + e.message); console.error(e); }
+  }
+  render();
+}
+function suResult() {
+  const c = suCfg();
+  if (!su.pdf || !su.csv) return null;
+  const col = su.csv.head.includes(c.stock_col) ? c.stock_col : su.csv.head.find(h => h.startsWith('stock:')) || c.stock_col;
+  return { col, rows: SU.buildUpdate(su.csv, su.pdf, { reserve: c.reserve, stockCol: col, mappings: c.mappings }) };
+}
+const SU_STATUS = { ok: ['ok', ''], nomap: ['warn', 'chybí kód dodavatele'], nocode: ['bad', 'kód není v listině'], nolen: ['warn', 'neznám délku varianty'] };
+function renderSuApp() {
+  const c = suCfg(), res = suResult();
+  const supCodes = su.pdf ? Object.keys(su.pdf.stock).sort() : [];
+  const sample = code => Object.entries(su.pdf.stock[code] || {}).map(([l, q]) => `${l.replace('.', ',')}: ${q}`).join(' · ');
+  let h = `
+    <div class="page-head"><div><div class="eyebrow">Aplikace 05</div><h1>StockUpdate 1.0</h1><div class="sub">${esc(c.supplier)} · ${esc(c.label)} — sklad dodavatele z PDF → import skladu do Shoptetu</div></div>
+      <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <label class="field" style="margin:0"><span>Rezerva</span><select id="su-res">${[0, 10, 20, 25, 30, 40, 50].map(v => `<option value="${v}" ${+c.reserve === v ? 'selected' : ''}>${v} %</option>`).join('')}</select></label>
+        <label class="field" style="margin:0"><span>Sklad v Shoptetu</span><select id="su-col">${[...new Set([c.stock_col, ...(su.csv?.head.filter(x => x.startsWith('stock:')) || [])])].map(x => `<option ${x === c.stock_col ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
+      </div></div>
+    <div class="grid-2">
+      <div class="card"><h3>1 · Sklad dodavatele (PDF)</h3>
+        ${su.pdf ? `<div class="small"><b>${esc(su.pdf.name)}</b><br>${su.pdf.updated ? `aktualizace u dodavatele ${esc(su.pdf.updated)} · ` : ''}${plural(Object.keys(su.pdf.stock).length, 'artikl', 'artikly', 'artiklů')}</div>` : ''}
+        <label class="imp-drop" id="su-drop-pdf" style="margin-top:8px"><input type="file" accept=".pdf" hidden><b>${su.pdf ? 'Nahrát jiné PDF' : 'Nahrát PDF'}</b><span class="small muted">G2 Terrassen-Lagerliste od Gunrebenu</span></label></div>
+      <div class="card"><h3>2 · Produkty ze Shoptetu (CSV)</h3>
+        ${su.csv ? `<div class="small"><b>${esc(su.csv.name)}</b><br>${plural(su.csv.rows.length, 'varianta', 'varianty', 'variant')}</div>` : ''}
+        <label class="imp-drop" id="su-drop-csv" style="margin-top:8px"><input type="file" accept=".csv" hidden><b>${su.csv ? 'Nahrát jiné CSV' : 'Nahrát CSV'}</b><span class="small muted">Export produktů (kód, partNumber, varianta s délkou, sklady)</span></label></div>
+    </div>`;
+  if (!res) {
+    h += `<div class="card empty"><div class="big">🔄</div><b>Nahraj obě listiny.</b><div class="small">Párování: <code>partNumber</code> v Shoptetu = kód artiklu u dodavatele (např. F31090A00150), délka varianty (3,0 m…) = řádek „Länge“. Do Shoptetu jde sklad dodavatele mínus ${+c.reserve} % (zaokrouhleno dolů).</div></div>`;
+    $('#view').innerHTML = h; return suBind();
+  }
+  const rows = res.rows, okR = rows.filter(r => r.status === 'ok'), bad = rows.filter(r => r.status !== 'ok');
+  const changed = okR.filter(r => r.change !== 0);
+  const shown = su.filter === 'issues' ? bad : su.filter === 'changed' ? changed : rows;
+  // skupiny bez kódu dodavatele → ruční přiřazení
+  const groups = [...new Map(rows.filter(r => r.status === 'nomap' || r.status === 'nocode' || r.mapped === 'ručně').map(r => [r.group, r])).values()];
+  h += `
+    <div class="stats">
+      <div class="stat"><div class="v">${okR.length}</div><div class="l">variant do importu</div></div>
+      <div class="stat"><div class="v">${changed.length}</div><div class="l">se změnou skladu</div></div>
+      <div class="stat"><div class="v">${okR.reduce((t, r) => t + r.next, 0).toLocaleString('cs-CZ')}</div><div class="l">ks celkem po rezervě ${+c.reserve} %</div></div>
+      <div class="stat"><div class="v" style="${bad.length ? 'color:var(--bad)' : ''}">${bad.length}</div><div class="l">bez párování (nepůjde do importu)</div></div>
+    </div>
+    ${groups.length ? `<div class="card"><h3>Přiřazení kódu dodavatele</h3><div class="small muted" style="margin-bottom:8px">Produkty bez <code>partNumber</code> v Shoptetu (nebo s kódem, který v listině není). Vyber artikl z listiny — uloží se pro příště. Trvalejší je doplnit partNumber přímo v Shoptetu.</div>
+      ${groups.map(g => `<div class="row" style="gap:10px;flex-wrap:wrap;margin:6px 0"><span class="grow"><b>${esc(g.name)}</b> <span class="muted small">${esc(g.code)}${g.supplierCode ? ' · ' + esc(g.supplierCode) : ''}</span></span>
+        <select data-sumap="${esc(g.group)}" style="max-width:100%"><option value="">— vyber artikl —</option>${supCodes.map(k => `<option value="${k}" ${c.mappings[g.group] === k ? 'selected' : ''}>${k} · ${esc(sample(k))}</option>`).join('')}</select></div>`).join('')}</div>` : ''}
+    <div class="card">
+      <div class="card-head"><div class="chips">${[['all', `Vše ${rows.length}`], ['changed', `Změna ${changed.length}`], ['issues', `Problémy ${bad.length}`]].map(([k, l]) => `<button class="chip ${su.filter === k ? 'on' : ''}" data-suf="${k}">${l}</button>`).join('')}</div>
+        <button class="btn primary" id="su-dl" ${okR.length ? '' : 'disabled'}>⬇ CSV pro Shoptet (${okR.length})</button></div>
+      <div class="table-wrap"><table class="su"><thead><tr><th>Kód</th><th>Produkt</th><th>Délka</th><th>Artikl dodavatele</th><th class="r">U dodavatele</th><th class="r">Do Shoptetu</th><th class="r">Teď</th><th class="r">Změna</th></tr></thead><tbody>
+      ${shown.map(r => { const [cls, txt] = SU_STATUS[r.status]; return `<tr class="${r.status !== 'ok' ? 'su-bad' : ''}"><td><b>${esc(r.code)}</b></td><td>${esc(r.name)}</td><td>${r.length ? esc(r.length.replace('.', ',')) + ' m' : '—'}</td>
+        <td>${esc(r.supplierCode || '—')}${r.mapped && r.mapped !== 'partNumber' ? ` <span class="muted small">(${esc(r.mapped)})</span>` : ''}${txt ? ` <span class="badge ${cls}">${txt}</span>` : ''}</td>
+        <td class="r">${r.supplierQty ?? ''}</td><td class="r"><b>${r.next ?? ''}</b></td><td class="r muted">${r.current ?? ''}</td>
+        <td class="r">${r.change == null ? '' : r.change === 0 ? '<span class="muted">0</span>' : `<span style="color:var(${r.change > 0 ? '--ok' : '--bad'})">${r.change > 0 ? '+' : ''}${r.change}</span>`}</td></tr>`; }).join('')}
+      </tbody></table></div>
+      <div class="small muted" style="margin-top:10px">Import v Shoptetu: Produkty → Import → vyber stažené CSV (kódování UTF-8, oddělovač středník). Soubor obsahuje jen <code>code</code>, <code>pairCode</code> a <code>${esc(res.col)}</code>, nic jiného se nezmění. Když délka v listině dodavatele chybí, bere se 0 ks.</div>
+    </div>`;
+  $('#view').innerHTML = h; suBind();
+}
+function suBind() {
+  for (const id of ['su-drop-pdf', 'su-drop-csv']) {
+    const d = $('#' + id); if (!d) continue; const inp = d.querySelector('input');
+    d.ondragover = e => { e.preventDefault(); d.classList.add('over'); };
+    d.ondragleave = () => d.classList.remove('over');
+    d.ondrop = e => { e.preventDefault(); d.classList.remove('over'); if (e.dataTransfer.files.length) suLoadFiles([...e.dataTransfer.files]); };
+    inp.onchange = () => { if (inp.files.length) suLoadFiles([...inp.files]); };
+  }
+  const save = row => act(async () => ok(await sb.from('su_config').upsert({ id: su.cfgId, supplier: suCfg().supplier, label: suCfg().label, ...row, updated_at: new Date().toISOString() })), 'Uloženo ✓');
+  if ($('#su-res')) $('#su-res').onchange = e => save({ reserve: Number(e.target.value) });
+  if ($('#su-col')) $('#su-col').onchange = e => save({ stock_col: e.target.value });
+  document.querySelectorAll('[data-sumap]').forEach(sel => sel.onchange = () => { const m = { ...suCfg().mappings }; if (sel.value) m[sel.dataset.sumap] = sel.value; else delete m[sel.dataset.sumap]; save({ mappings: m }); });
+  document.querySelectorAll('[data-suf]').forEach(b => b.onclick = () => { su.filter = b.dataset.suf; render(); });
+  if ($('#su-dl')) $('#su-dl').onclick = async () => {
+    const res = suResult(); const okR = res.rows.filter(r => r.status === 'ok');
+    const blob = new Blob([SU.exportRows(res.rows, res.col)], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `stockupdate-${su.cfgId}-${todayIso()}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    try { ok(await sb.from('su_config').update({ last_run: { at: new Date().toISOString(), rows: okR.length, pdf: su.pdf.name, pdfUpdated: su.pdf.updated, reserve: suCfg().reserve } }).eq('id', su.cfgId)); await loadState(); } catch (e) { console.warn(e); }
+  };
 }
 const prevMonth = () => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); };
 const monthLabel = m => { const [y, mo] = m.split('-').map(Number); return new Date(y, mo - 1, 1).toLocaleDateString('cs-CZ', { month: 'long', year: 'numeric' }); };
