@@ -1,9 +1,9 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261006f';
-import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261006f';
-import * as SU from './stockupdate-core.js?v=20261006f';
+import * as DC from './dochazka-core.js?v=20261007b';
+import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261007b';
+import * as SU from './stockupdate-core.js?v=20261007b';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -25,13 +25,20 @@ const TABS = [
 ];
 // stav objednávky v SmartJoi (od ruky ze Shoptetu až po svoz)
 const STATE = {
+  issue:     ['Reklamace / problém', 'bad', 0],
   todo:      ['Potřeba objednat', 'warn', 1],
   waiting:   ['Čeká na AUF', 'info', 2],
   confirmed: ['AUF potvrzen · bez svozu', 'ok', 3],
-  shipping:  ['Ve svozu', 'ok', 4],
-  none:      ['Nic k objednání', '', 5],
-  empty:     ['Bez položek', '', 6],
+  shipping:  ['Na cestě', 'ok', 4],
+  delivered: ['Doručeno', 'ok', 5],
+  none:      ['Nic k objednání', '', 6],
+  empty:     ['Bez položek', '', 7],
 };
+// stav dodání AUFu (po příjezdu svozu)
+const DELIVERY = { ok: ['Doručeno v pořádku', 'ok', '✓'], complaint: ['Reklamace', 'bad', '⚠'], missing: ['Chybí zboží', 'bad', '⚠'], damaged: ['Poškozené zboží', 'bad', '⚠'], other: ['Jiný problém', 'warn', '⚠'] };
+const isIssue = a => !!a.deliveredAt && !!a.delivery && a.delivery !== 'ok';
+// fáze pro ukazatel postupu: objednáno → AUF → svoz → doručeno
+const STEP = { todo: 0, waiting: 1, confirmed: 2, shipping: 3, delivered: 4, issue: 4 };
 const AUF_STATE = { draft: ['Koncept e-mailu', ''], sent: ['Odesláno · čeká na AUF', 'info'], confirmed: ['AUF potvrzen', 'ok'] };
 
 // ---------- helpers ----------
@@ -118,8 +125,8 @@ async function loadState() {
     products,
     orders: orders.map(o => ({ code: o.code, date: o.order_date, customer: o.customer, shoptetStatus: o.shoptet_status, active: o.active, note: o.note || '', archived: o.archived, manual: !!o.manual })),
     items: items.map(i => ({ key: i.key, orderCode: i.order_code, code: i.code, name: i.name, qty: Number(i.qty), unit: i.unit, active: i.active, decision: i.decision, supplierId: i.supplier_id || '', aufId: i.auf_id || '', manual: !!i.manual, variant: i.variant || '' })),
-    aufs: aufs.map(a => ({ id: a.id, orderCode: a.order_code, supplierId: a.supplier_id || '', status: a.status, to: a.email_to, subject: a.subject, body: a.body, lines: a.lines || [], sentAt: a.sent_at, aufNumber: a.auf_number || '', amount: a.amount_eur == null ? null : Number(a.amount_eur), confirmedAt: a.confirmed_at, note: a.note || '', shipmentId: a.shipment_id || '', createdAt: a.created_at })),
-    shipments: ships.map(s => ({ id: s.id, date: s.ship_date || '', note: s.note || '', ref: s.reference || '' })),
+    aufs: aufs.map(a => ({ id: a.id, orderCode: a.order_code, supplierId: a.supplier_id || '', status: a.status, to: a.email_to, subject: a.subject, body: a.body, lines: a.lines || [], sentAt: a.sent_at, aufNumber: a.auf_number || '', amount: a.amount_eur == null ? null : Number(a.amount_eur), confirmedAt: a.confirmed_at, note: a.note || '', shipmentId: a.shipment_id || '', createdAt: a.created_at, deliveredAt: a.delivered_at || null, delivery: a.delivery_status || '', deliveryNote: a.delivery_note || '', resolvedAt: a.issue_resolved_at || null })),
+    shipments: ships.map(s => ({ id: s.id, date: s.ship_date || '', note: s.note || '', ref: s.reference || '', deliveredAt: s.delivered_at || null })),
     events,
     stock,
     att: {
@@ -181,10 +188,12 @@ function orderState(code) {
   const its = orderItems(code), aufs = aufsOf(code);
   if (!its.length && !aufs.length) return 'empty';
   const open = its.filter(i => !i.aufId);
+  if (aufs.some(isIssue)) return 'issue';
   if (open.some(i => effDec(i) === 'order') || aufs.some(a => a.status === 'draft')) return 'todo';
   if (aufs.some(a => a.status === 'sent')) return 'waiting';
-  if (aufs.some(a => a.status === 'confirmed' && !a.shipmentId)) return 'confirmed';
-  if (aufs.some(a => a.status === 'confirmed')) return 'shipping';
+  if (aufs.some(a => a.status === 'confirmed' && !a.shipmentId && !a.deliveredAt)) return 'confirmed';
+  if (aufs.some(a => a.status === 'confirmed' && !a.deliveredAt)) return 'shipping';
+  if (aufs.some(a => a.deliveredAt)) return 'delivered';
   return 'none';
 }
 function counts() {
@@ -192,8 +201,10 @@ function counts() {
   const st = act.map(o => orderState(o.code));
   return {
     todo: st.filter(x => x === 'todo').length, waiting: st.filter(x => x === 'waiting').length,
-    unshipped: S.aufs.filter(a => a.status === 'confirmed' && !a.shipmentId).length,
-    shipping: S.shipments.filter(s => s.date >= todayIso()).length,
+    issue: st.filter(x => x === 'issue').length, transit: st.filter(x => x === 'shipping').length,
+    unshipped: S.aufs.filter(a => a.status === 'confirmed' && !a.shipmentId && !a.deliveredAt).length,
+    shipping: S.shipments.filter(s => !s.deliveredAt).length,
+    toReceive: S.shipments.filter(s => !s.deliveredAt && s.date && s.date <= todayIso() && aufsInShipment(s.id).length).length,
     sentAufs: S.aufs.filter(a => a.status === 'sent').length,
   };
 }
@@ -246,10 +257,12 @@ function renderHub() {
         <h3>OrderJoi</h3>
         <p>Vinylor · objednávky od dodavatelů: Shoptet → e-mail dodavateli → AUF → svoz.</p>
         <div class="badge-row">
+          ${c.issue ? `<span class="badge bad"><span class="dot"></span>${c.issue} reklamace</span>` : ''}
           ${c.todo ? `<span class="badge warn"><span class="dot"></span>${c.todo} potřeba objednat</span>` : ''}
           ${c.sentAufs ? `<span class="badge info">${c.sentAufs} čeká na AUF</span>` : ''}
           ${c.unshipped ? `<span class="badge ok">${c.unshipped} AUF bez svozu</span>` : ''}
-          ${!c.todo && !c.sentAufs && !c.unshipped ? `<span class="badge ok"><span class="dot"></span>Vše vyřízeno</span>` : ''}
+          ${c.toReceive ? `<span class="badge info">🚚 ${c.toReceive} svoz k převzetí</span>` : ''}
+          ${!c.todo && !c.sentAufs && !c.unshipped && !c.issue ? `<span class="badge ok"><span class="dot"></span>Vše vyřízeno</span>` : ''}
         </div>
       </a>
       <a class="app-card" href="#/emaily">
@@ -1759,7 +1772,7 @@ function syncNotices() {
 }
 function renderOrdersApp(tab) {
   const c = counts();
-  const tabCount = { objednavky: c.todo, aufy: c.sentAufs, svozy: c.unshipped, dodavatele: S.suppliers.length };
+  const tabCount = { objednavky: c.todo + c.issue, aufy: c.sentAufs, svozy: c.unshipped + c.toReceive, dodavatele: S.suppliers.length };
   let html = `
     <div class="page-head">
       <div><div class="eyebrow">Aplikace 01 · Vinylor · objednávky od dodavatelů</div><h1>OrderJoi</h1></div>
@@ -1783,42 +1796,68 @@ async function doSync() {
 }
 
 // --- tab: Objednávky (seznam)
+const ACTIVE_ST = ['issue', 'todo', 'waiting', 'confirmed', 'shipping'];
+const ST_ICON = { issue: '⚠', todo: '🛒', waiting: '✉', confirmed: '📋', shipping: '🚚', delivered: '✓' };
+const relDay = d => { if (!d) return ''; const n = Math.round((new Date(d + 'T12:00:00') - new Date(todayIso() + 'T12:00:00')) / 864e5); return n === 0 ? 'dnes' : n === 1 ? 'zítra' : n === -1 ? 'včera' : n > 0 ? `za ${plural(n, 'den', 'dny', 'dní')}` : `před ${plural(-n, 'dnem', 'dny', 'dny')}`; };
+function orderSteps(st) {
+  const i = STEP[st]; if (i == null) return '';
+  const L = ['Objednat', 'AUF', 'Svoz', 'Doručeno'];
+  return `<div class="osteps ${st === 'issue' ? 'is-issue' : ''}" title="${L.map((l, k) => (k < i || st === 'delivered' ? '✓ ' : k === i ? '● ' : '○ ') + l).join('  ')}">${L.map((l, k) => `<i class="${k < i || st === 'delivered' ? 'done' : k === i ? 'now' : ''}"></i>`).join('')}</div>`;
+}
 function tabOrders() {
   const c = counts();
-  const archived = ui.orderFilter === 'archive';
+  const f = ['active', 'done', 'archive'].includes(ui.orderFilter) ? ui.orderFilter : 'active';
   const words = fold(ui.orderSearch).split(/\s+/).filter(Boolean);
   // hledá v čísle objednávky, AUF číslech, zákazníkovi, poznámkách i položkách (i v archivu)
   const hay = o => fold([o.code, o.customer, o.note, o.shoptetStatus,
-    ...aufsOf(o.code).flatMap(a => [a.aufNumber, a.note, supName(a.supplierId)]),
+    ...aufsOf(o.code).flatMap(a => [a.aufNumber, a.note, a.deliveryNote, supName(a.supplierId)]),
     ...S.items.filter(i => i.orderCode === o.code).flatMap(i => [i.code, i.name, i.variant, prod(i.code).mpn])].join(' '));
-  const list = S.orders.filter(o => words.length ? words.every(w => hay(o).includes(w)) : o.archived === archived)
-    .map(o => ({ o, st: orderState(o.code) }))
-    .filter(x => words.length || archived || x.st !== 'empty' || x.o.active)
-    .sort((a, b) => STATE[a.st][2] - STATE[b.st][2] || String(b.o.date).localeCompare(String(a.o.date)) || b.o.code.localeCompare(a.o.code));
-  let h = `<div class="stats">
-      <div class="stat"><div class="v" style="${c.todo ? 'color:var(--warn)' : ''}">${c.todo}</div><div class="l">potřeba objednat</div></div>
-      <div class="stat"><div class="v">${c.sentAufs}</div><div class="l">čeká na AUF</div></div>
-      <div class="stat"><div class="v">${c.unshipped}</div><div class="l">AUF bez svozu</div></div>
-      <div class="stat"><div class="v">${c.shipping}</div><div class="l">naplánované svozy</div></div>
-    </div>
-    <div class="row o-tools" style="margin-bottom:12px">
-      <input type="search" id="o-search" placeholder="Hledat: číslo objednávky, AUF, jméno, reference…" value="${esc(ui.orderSearch)}">
-      <div class="chips" ${words.length ? 'style="opacity:.45"' : ''}><button class="chip ${!archived ? 'on' : ''}" data-ofilter="active">Aktivní</button><button class="chip ${archived ? 'on' : ''}" data-ofilter="archive">Archiv</button></div>
+  const all = S.orders.map(o => ({ o, st: orderState(o.code) }));
+  const inF = x => f === 'archive' ? x.o.archived : !x.o.archived && (f === 'active' ? ACTIVE_ST.includes(x.st) : !ACTIVE_ST.includes(x.st) && (x.st !== 'empty' || x.o.manual));
+  let list = words.length ? all.filter(x => words.every(w => hay(x.o).includes(w))) : all.filter(inF);
+  if (!words.length && f === 'active' && ui.orderState) list = list.filter(x => x.st === ui.orderState);
+  list.sort((a, b) => STATE[a.st][2] - STATE[b.st][2] || String(b.o.date).localeCompare(String(a.o.date)) || b.o.code.localeCompare(a.o.code));
+  const nDone = all.filter(x => !x.o.archived && !ACTIVE_ST.includes(x.st) && (x.st !== 'empty' || x.o.manual)).length;
+  const deliveredCnt = all.filter(x => !x.o.archived && x.st === 'delivered').length;
+  const tiles = [['issue', 'Reklamace', c.issue], ['todo', 'Objednat', c.todo], ['waiting', 'Čeká na AUF', c.waiting], ['confirmed', 'Bez svozu', all.filter(x => !x.o.archived && x.st === 'confirmed').length], ['shipping', 'Na cestě', c.transit], ['delivered', 'Doručeno', deliveredCnt]];
+  // nejbližší svoz
+  const nextShip = S.shipments.filter(x => !x.deliveredAt && aufsInShipment(x.id).length).sort((x, y) => String(x.date || '9').localeCompare(String(y.date || '9')))[0];
+  let h = `<div class="pipe">${tiles.map(([k, l, n], idx) => `<button class="pipe-t st-${k} ${ui.orderState === k && f === 'active' ? 'on' : ''} ${!n ? 'zero' : ''}" data-ostate="${k}" style="--i:${idx}">
+      <span class="pipe-i">${ST_ICON[k]}</span><span class="pipe-n" data-count="${n}">${n}</span><span class="pipe-l">${l}</span></button>`).join('')}</div>
+    ${nextShip ? (() => { const L = aufsInShipment(nextShip.id), due = nextShip.date && nextShip.date <= todayIso(); return `<div class="nextship ${due ? 'due' : ''}">
+      <span class="ns-truck">🚚</span><div class="grow"><b>${due ? 'Svoz by měl být u nás' : 'Nejbližší svoz'}${nextShip.ref ? ' · ' + esc(nextShip.ref) : ''}</b>
+      <div class="sub">${nextShip.date ? `${esc(fmtDay(nextShip.date))} · ${relDay(nextShip.date)}` : 'bez data'} · ${plural(L.length, 'AUF', 'AUFy', 'AUFů')} · ${eur(sumEur(L))}</div></div>
+      ${due ? `<button class="btn primary sm" data-deliver="${nextShip.id}">✓ Označit doručení</button>` : `<a class="btn sm ghost" href="#/objednavky/svozy">Svozy ›</a>`}</div>`; })() : ''}
+    <div class="row o-tools">
+      <div class="osearch"><span>⌕</span><input type="search" id="o-search" placeholder="Hledat objednávku, AUF, zákazníka, položku…" value="${esc(ui.orderSearch)}"></div>
+      <div class="chips" ${words.length ? 'style="opacity:.45"' : ''}>${[['active', 'Aktivní', c.todo + c.waiting + c.issue + c.transit + all.filter(x => !x.o.archived && x.st === 'confirmed').length], ['done', 'Vyřízené', nDone], ['archive', 'Archiv', S.orders.filter(o => o.archived).length]].map(([k, l, n]) => `<button class="chip ${f === k ? 'on' : ''}" data-ofilter="${k}">${l} <span class="muted">${n}</span></button>`).join('')}</div>
       <div class="grow"></div><button class="btn sm" data-neworder>＋ Ruční objednávka</button>
-    </div>`;
-  if (words.length && !list.length) return h + `<div class="card empty"><b>Nic nenalezeno pro „${esc(ui.orderSearch)}“.</b><div class="small">Hledá se v aktivních i archivovaných objednávkách.</div></div>`;
-  if (words.length) h += `<div class="small muted" style="margin:-4px 0 10px">${plural(list.length, 'výsledek', 'výsledky', 'výsledků')} — aktivní i archiv</div>`;
-  if (!list.length) return h + `<div class="card empty"><div class="big">✓</div><b>${archived ? 'Archiv je prázdný.' : `Žádné objednávky ve stavu „${esc(S.settings.statusValue)}“.`}</b><div class="small">${!archived && S.sync.fetchedAt ? 'Poslední načtení ' + ago(S.sync.fetchedAt) + '.' : ''}</div></div>`;
-  h += `<div class="card" style="padding:6px 0"><div class="olist">${list.map(({ o, st }) => {
-    const its = orderItems(o.code);
-    const sups = [...new Set(its.filter(i => effDec(i) === 'order' && effSup(i)).map(effSup))];
-    const aufs = aufsOf(o.code).filter(a => a.aufNumber);
-    return `<a class="orow" href="#/objednavky/o/${encodeURIComponent(o.code)}">
-      <div class="grow"><div class="row" style="gap:8px"><b>${esc(o.code)}</b>${o.manual ? '<span class="badge">ručně</span>' : ''}${words.length && o.archived ? '<span class="badge">archiv</span>' : ''}${o.note ? '<span title="Má poznámku">📝</span>' : ''}${!o.manual && !o.active && o.shoptetStatus ? `<span class="sub">Shoptet: ${esc(o.shoptetStatus)}</span>` : ''}</div>
-        <div class="sub">${esc(o.customer || '')}${o.customer && o.date ? ' · ' : ''}${esc(String(o.date).slice(0, 10))} · ${plural(its.length, 'položka', 'položky', 'položek')}${sups.length ? ' · ' + sups.map(s => `${flag(supplierById(s)?.country)} ${esc(supName(s))}`).join(', ') : ''}${aufs.length ? ' · AUF ' + aufs.map(a => esc(a.aufNumber)).join(', ') : ''}</div></div>
-      <span class="badge ${STATE[st][1]}">${STATE[st][0]}</span><span class="chev">›</span></a>`;
-  }).join('')}</div></div>`;
-  return h;
+    </div>
+    ${!words.length && f === 'active' && ui.orderState ? `<div class="small muted" style="margin:-4px 0 10px">Filtr: <b>${esc(STATE[ui.orderState][0])}</b> · <a href="#" data-ostate="">zrušit</a></div>` : ''}`;
+  if (words.length && !list.length) return h + `<div class="card empty"><div class="big">🔍</div><b>Nic nenalezeno pro „${esc(ui.orderSearch)}“.</b><div class="small">Hledá se v aktivních, vyřízených i archivovaných objednávkách.</div></div>`;
+  if (words.length) h += `<div class="small muted" style="margin:-4px 0 10px">${plural(list.length, 'výsledek', 'výsledky', 'výsledků')} — všechny objednávky</div>`;
+  if (!list.length) return h + `<div class="card empty fadein"><div class="big">${f === 'active' ? '🎉' : '🗂'}</div><b>${f === 'active' ? (ui.orderState ? 'Tady nic není.' : 'Všechno vyřízeno.') : f === 'done' ? 'Zatím nic vyřízeného.' : 'Archiv je prázdný.'}</b><div class="small">${f === 'active' && S.sync.fetchedAt ? 'Shoptet načten ' + ago(S.sync.fetchedAt) + '.' : ''}</div></div>`;
+  const grouped = !words.length && f === 'active' && !ui.orderState;
+  const row = ({ o, st }, idx) => {
+    const its = orderItems(o.code), aufs = aufsOf(o.code);
+    const sups = [...new Set([...its.filter(i => effDec(i) === 'order' && effSup(i)).map(effSup), ...aufs.map(a => a.supplierId)])].filter(Boolean);
+    const issues = aufs.filter(isIssue);
+    const ship = aufs.map(a => a.shipmentId && shipmentById(a.shipmentId)).find(x => x && !x.deliveredAt);
+    return `<a class="orow st-${st}" style="--i:${Math.min(idx, 14)}" href="#/objednavky/o/${encodeURIComponent(o.code)}">
+      <div class="grow"><div class="row" style="gap:8px"><b class="ocode">${esc(o.code)}</b>${o.manual ? '<span class="badge">ručně</span>' : ''}${o.archived ? '<span class="badge">archiv</span>' : ''}${o.note ? '<span title="Má poznámku">📝</span>' : ''}</div>
+        <div class="sub">${esc(o.customer || '')}${o.customer ? ' · ' : ''}${esc(String(o.date || '').slice(0, 10))} · ${plural(its.length, 'položka', 'položky', 'položek')}${sups.length ? ' · ' + sups.map(x => `${flag(supplierById(x)?.country)} ${esc(supName(x))}`).join(', ') : ''}</div>
+        ${issues.length ? `<div class="oissue">⚠ ${issues.map(a => `${esc(DELIVERY[a.delivery][0])}${a.aufNumber ? ' (AUF ' + esc(a.aufNumber) + ')' : ''}${a.deliveryNote ? ': ' + esc(a.deliveryNote) : ''}`).join(' · ')}</div>` : ''}
+        ${st === 'shipping' && ship ? `<div class="sub">🚚 ${ship.ref ? esc(ship.ref) + ' · ' : ''}${ship.date ? esc(fmtDay(ship.date)) + ' · ' + relDay(ship.date) : 'bez data'}</div>` : ''}</div>
+      ${orderSteps(st)}
+      ${grouped ? '' : `<span class="badge ${STATE[st][1]}">${STATE[st][0]}</span>`}<span class="chev">›</span></a>`;
+  };
+  if (!words.length && f === 'active' && !ui.orderState) {
+    let k = 0;
+    for (const st of ACTIVE_ST) { const g = list.filter(x => x.st === st); if (!g.length) continue;
+      h += `<div class="ogroup st-${st}"><div class="ogroup-h"><span>${ST_ICON[st]} ${STATE[st][0]}</span><span class="muted">${g.length}</span></div><div class="card olist-card"><div class="olist">${g.map(x => row(x, k++)).join('')}</div></div></div>`; }
+    return h;
+  }
+  return h + `<div class="card olist-card"><div class="olist">${list.map(row).join('')}</div></div>`;
 }
 
 // --- detail objednávky
@@ -1844,6 +1883,7 @@ function renderOrderDetail(code) {
         ${o.manual ? `<button class="btn sm ghost" id="o-edit">✎ Upravit</button>${aufs.some(a => a.status !== 'draft') ? '' : '<button class="btn sm ghost" id="o-delete">🗑 Smazat</button>'}` : ''}
         <button class="btn sm ghost" id="o-archive">${o.archived ? '↩ Obnovit z archivu' : '🗄 Archivovat'}</button></div>
     </div>
+    ${STEP[st] != null ? `<div class="otimeline st-${st}">${['Objednat u dodavatele', 'AUF potvrzen', 'Ve svozu', st === 'issue' ? 'Reklamace' : 'Doručeno'].map((l, k) => { const i = STEP[st], done = k < i || st === 'delivered', now = k === i && st !== 'delivered'; return `<div class="ot ${done ? 'done' : now ? 'now' : ''} ${st === 'issue' && k === 3 ? 'bad' : ''}"><span class="ot-dot">${done ? '✓' : st === 'issue' && k === 3 ? '!' : k + 1}</span><span class="ot-l">${l}</span></div>`; }).join('<span class="ot-line"></span>')}</div>` : ''}
 
     <div class="card">
       <div class="card-head"><div><h2>Položky</h2><div class="sub">Zaškrtni, co objednáváš, a u koho. Dodavatel se u produktu zapamatuje pro příště.</div></div>
@@ -2062,15 +2102,15 @@ function renderAuf(a, { showOrder = false } = {}) {
   const s = supplierById(a.supplierId) || { name: '(smazaný dodavatel)' };
   const ship = a.shipmentId ? shipmentById(a.shipmentId) : null;
   const docs = ui.docs[a.id];
-  const shipOpts = `<option value="">— bez svozu —</option>${S.shipments.map(x => `<option value="${x.id}" ${a.shipmentId === x.id ? 'selected' : ''}>${x.ref ? esc(x.ref) + ' · ' : ''}${esc(fmtDay(x.date))}${x.note ? ' · ' + esc(x.note) : ''}</option>`).join('')}<option value="__new">＋ Nový svoz…</option>`;
-  return `<div class="auf ${a.status}" data-aufcard="${a.id}">
+  const shipOpts = `<option value="">— bez svozu —</option>${S.shipments.filter(x => !x.deliveredAt || x.id === a.shipmentId).map(x => `<option value="${x.id}" ${a.shipmentId === x.id ? 'selected' : ''}>${x.ref ? esc(x.ref) + ' · ' : ''}${esc(fmtDay(x.date))}${x.note ? ' · ' + esc(x.note) : ''}</option>`).join('')}<option value="__new">＋ Nový svoz…</option>`;
+  return `<div class="auf ${a.status} ${isIssue(a) ? 'dlv-issue' : a.deliveredAt ? 'dlv-ok' : ''}" data-aufcard="${a.id}">
     <div class="auf-head">
       <span class="flag">${flag(s.country)}</span>
       <div class="grow"><b>${esc(s.name)}</b>${showOrder ? ` · <a href="#/objednavky/o/${encodeURIComponent(a.orderCode)}">obj. ${esc(a.orderCode)}</a>` : ''}
         <div class="sub">${plural(a.lines.length, 'položka', 'položky', 'položek')}${a.sentAt ? ' · odesláno ' + fmtDate(a.sentAt, false) : ''}${ship ? ' · svoz ' + esc(fmtDay(ship.date)) : ''}</div></div>
       ${a.aufNumber ? `<div class="auf-no"><div class="sub">AUF</div><b>${esc(a.aufNumber)}</b></div>` : ''}
       ${a.amount != null ? `<div class="auf-no"><div class="sub">Částka</div><b>${eur(a.amount)}</b></div>` : ''}
-      <span class="badge ${AUF_STATE[a.status][1]}">${AUF_STATE[a.status][0]}</span>
+      ${a.deliveredAt ? `<span class="badge ${DELIVERY[a.delivery]?.[1] || 'ok'}">${esc(DELIVERY[a.delivery]?.[0] || 'Doručeno')}</span>` : `<span class="badge ${AUF_STATE[a.status][1]}">${AUF_STATE[a.status][0]}</span>`}
     </div>
     <div class="auf-lines small muted">${a.lines.map(l => `${esc(l.code || l.name)}${l.variant ? ' (' + esc(l.variant) + ')' : ''} × ${fmtQty(l.qty)}`).join(' · ')}</div>
     ${a.status === 'draft' ? `<div class="row"><button class="btn primary sm" data-aufmail="${a.id}">✉ Otevřít e-mail</button><button class="btn sm ghost danger" data-aufdel="${a.id}">Zrušit</button></div>` : `
@@ -2085,6 +2125,14 @@ function renderAuf(a, { showOrder = false } = {}) {
       ${docs === undefined || docs === 'loading' ? '<div class="small muted">Načítám…</div>' : docs.length ? docs.map(d => `<div class="doc"><a href="#" data-dl="${esc(a.id + '/' + d.name)}">📄 ${esc(d.name.replace(/^\d+-/, ''))}</a><span class="sub">${fmtSize(d.metadata?.size || 0)}</span><button class="icon-btn" data-deldoc="${esc(a.id + '/' + d.name)}" title="Smazat">🗑</button></div>`).join('') : '<div class="small muted">Zatím žádné.</div>'}
       <label class="btn sm" style="margin-top:6px">＋ Přiložit dokument<input type="file" multiple data-upload="${a.id}" hidden></label>
     </div>
+    ${a.status === 'confirmed' ? `<div class="dlv ${isIssue(a) ? 'issue' : a.deliveredAt ? 'ok' : ''}">
+      <div class="sub" style="margin-bottom:6px">Dodání ${a.deliveredAt ? '· ' + esc(fmtDate(a.deliveredAt, false)) : ''}${a.resolvedAt && a.delivery === 'ok' && a.deliveryNote ? ' · problém vyřešen ' + esc(fmtDate(a.resolvedAt, false)) : ''}</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <select data-dlvst="${a.id}" style="max-width:220px"><option value="">${a.deliveredAt ? '— vrátit na nedoručeno —' : '— zatím nedoručeno —'}</option>${Object.entries(DELIVERY).map(([k, [l]]) => `<option value="${k}" ${a.deliveredAt && a.delivery === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <input type="text" class="grow" data-dlvnote="${a.id}" placeholder="Poznámka k dodání / reklamaci" value="${esc(a.deliveryNote)}" style="min-width:200px">
+        <button class="btn sm" data-dlvsave="${a.id}">Uložit</button>
+        ${isIssue(a) ? `<button class="btn sm primary" data-dlvres="${a.id}">✓ Vyřešeno</button>` : ''}
+      </div></div>` : ''}
     <div class="row"><button class="btn sm ghost" data-aufmail="${a.id}">✉ E-mail</button>${a.status === 'sent' ? `<button class="btn sm ghost danger" data-aufdel="${a.id}">Zrušit objednávku</button>` : ''}</div>`}
   </div>`;
 }
@@ -2116,6 +2164,16 @@ function bindAufs() {
       if (a.shipmentId) await syncShipmentEvent(a.shipmentId);
       if (sel.value) await syncShipmentEvent(sel.value);
     }, sel.value ? 'Přidáno do svozu ✓' : 'Odebráno ze svozu');
+  });
+  V.querySelectorAll('[data-dlvsave]').forEach(b => b.onclick = () => {
+    const id = b.dataset.dlvsave, a = aufById(id), st = V.querySelector(`[data-dlvst="${id}"]`).value, note = V.querySelector(`[data-dlvnote="${id}"]`).value.trim();
+    const row = st ? { delivered_at: a.deliveredAt || new Date().toISOString(), delivery_status: st, delivery_note: note, issue_resolved_at: st === 'ok' && isIssue(a) ? new Date().toISOString() : st === 'ok' ? a.resolvedAt : null }
+      : { delivered_at: null, delivery_status: '', delivery_note: note, issue_resolved_at: null };
+    act(async () => ok(await sb.from('aufs').update({ ...row, updated_at: new Date().toISOString() }).eq('id', id)), st && st !== 'ok' ? 'Uloženo — označeno jako problém ⚠' : 'Uloženo ✓');
+  });
+  V.querySelectorAll('[data-dlvres]').forEach(b => b.onclick = () => {
+    const id = b.dataset.dlvres, note = V.querySelector(`[data-dlvnote="${id}"]`)?.value.trim() ?? aufById(id).deliveryNote;
+    act(async () => ok(await sb.from('aufs').update({ delivery_status: 'ok', delivery_note: note, issue_resolved_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', id)), 'Vyřešeno ✓');
   });
   V.querySelectorAll('[data-upload]').forEach(inp => inp.onchange = async () => {
     const id = inp.dataset.upload;
@@ -2245,14 +2303,14 @@ function openAufEmail(id) {
 
 // --- tab: AUFy
 function tabAufs() {
-  const F = { sent: ['Čeká na AUF', a => a.status === 'sent'], unshipped: ['Potvrzené bez svozu', a => a.status === 'confirmed' && !a.shipmentId], confirmed: ['Všechny potvrzené', a => a.status === 'confirmed'], all: ['Vše', () => true] };
+  const F = { sent: ['Čeká na AUF', a => a.status === 'sent'], unshipped: ['Potvrzené bez svozu', a => a.status === 'confirmed' && !a.shipmentId && !a.deliveredAt], issues: ['Reklamace', a => isIssue(a)], confirmed: ['Všechny potvrzené', a => a.status === 'confirmed'], all: ['Vše', () => true] };
   const f = F[ui.aufFilter] ? ui.aufFilter : 'sent';
   const list = S.aufs.filter(F[f][1]);
   const conf = S.aufs.filter(a => a.status === 'confirmed');
   let h = `<div class="stats">
     <div class="stat"><div class="v">${S.aufs.filter(a => a.status === 'sent').length}</div><div class="l">čeká na AUF</div></div>
-    <div class="stat"><div class="v">${conf.filter(a => !a.shipmentId).length}</div><div class="l">potvrzené bez svozu</div></div>
-    <div class="stat"><div class="v eur">${eur(sumEur(conf.filter(a => !a.shipmentId)))}</div><div class="l">hodnota bez svozu</div></div>
+    <div class="stat"><div class="v">${conf.filter(a => !a.shipmentId && !a.deliveredAt).length}</div><div class="l">potvrzené bez svozu</div></div>
+    <div class="stat"><div class="v eur">${eur(sumEur(conf.filter(a => !a.shipmentId && !a.deliveredAt)))}</div><div class="l">hodnota bez svozu</div></div>
     <div class="stat"><div class="v">${S.aufs.filter(a => a.status === 'draft').length}</div><div class="l">neodeslané koncepty</div></div>
   </div>
   <div class="chips" style="margin-bottom:12px">${Object.entries(F).map(([k, [l, fn]]) => `<button class="chip ${k === f ? 'on' : ''}" data-afilter="${k}">${l} <span class="muted">${S.aufs.filter(fn).length}</span></button>`).join('')}</div>`;
@@ -2262,46 +2320,89 @@ function tabAufs() {
 
 // --- tab: Svozy
 function tabShipments() {
-  const unassigned = S.aufs.filter(a => a.status === 'confirmed' && !a.shipmentId);
-  const upcoming = S.shipments.filter(s => !s.date || s.date >= todayIso());
-  const past = S.shipments.filter(s => s.date && s.date < todayIso()).reverse();
-  const shipCard = s => {
-    const list = aufsInShipment(s.id);
-    const details = shipmentDetails(s);
-    return `<div class="card ship">
+  const unassigned = S.aufs.filter(a => a.status === 'confirmed' && !a.shipmentId && !a.deliveredAt);
+  const open = S.shipments.filter(s => !s.deliveredAt).sort((x, y) => String(x.date || '9').localeCompare(String(y.date || '9')));
+  const delivered = S.shipments.filter(s => s.deliveredAt).sort((x, y) => String(y.deliveredAt).localeCompare(String(x.deliveredAt)));
+  const shipCard = (s, idx) => {
+    const list = aufsInShipment(s.id), details = shipmentDetails(s);
+    const due = !s.deliveredAt && s.date && s.date <= todayIso();
+    const issues = list.filter(isIssue);
+    return `<div class="card ship ${s.deliveredAt ? 'delivered' : due ? 'due' : ''}" style="--i:${idx}">
       <div class="card-head">
-        <div><h2 style="margin:0">🚚 ${s.ref ? `<span class="ship-ref">${esc(s.ref)}</span> ` : ''}${esc(fmtDay(s.date))}</h2>${s.note ? `<div class="sub">${esc(s.note)}</div>` : ''}</div>
+        <div><h2 style="margin:0">${s.deliveredAt ? '📦' : '🚚'} ${s.ref ? `<span class="ship-ref">${esc(s.ref)}</span> ` : ''}${esc(fmtDay(s.date))}</h2>
+          <div class="sub">${s.deliveredAt ? `doručeno ${esc(fmtDate(s.deliveredAt, false))}${issues.length ? ` · <span style="color:var(--bad)">⚠ ${plural(issues.length, 'problém', 'problémy', 'problémů')}</span>` : ' · vše v pořádku'}` : s.date ? relDay(s.date) : 'bez data'}${s.note ? ' · ' + esc(s.note) : ''}</div></div>
         <div class="row">
           <div class="auf-no"><div class="sub">AUFů</div><b>${list.length}</b></div>
           <div class="auf-no"><div class="sub">Celkem</div><b>${eur(sumEur(list))}</b></div>
         </div>
       </div>
-      ${list.length ? `<div class="table-wrap"><table><thead><tr><th>AUF</th><th>Dodavatel</th><th class="hide-m">Objednávka</th><th class="num">Částka</th><th></th></tr></thead><tbody>
+      ${list.length ? `<div class="table-wrap"><table><thead><tr><th>AUF</th><th>Dodavatel</th><th class="hide-m">Objednávka</th><th class="num">Částka</th><th>${s.deliveredAt ? 'Stav' : ''}</th></tr></thead><tbody>
         ${list.map(a => `<tr><td><b>${esc(a.aufNumber)}</b></td><td>${flag(supplierById(a.supplierId)?.country)} ${esc(supName(a.supplierId))}</td>
           <td class="hide-m"><a href="#/objednavky/o/${encodeURIComponent(a.orderCode)}">${esc(a.orderCode)}</a></td><td class="num">${eur(a.amount)}</td>
-          <td><button class="icon-btn" data-unship="${a.id}" title="Odebrat ze svozu">✕</button></td></tr>`).join('')}
+          <td>${a.deliveredAt ? `<span class="badge ${DELIVERY[a.delivery]?.[1] || 'ok'}" title="${esc(a.deliveryNote)}">${esc(DELIVERY[a.delivery]?.[0] || 'Doručeno')}</span>${a.deliveryNote ? `<div class="sub">${esc(a.deliveryNote)}</div>` : ''}` : `<button class="icon-btn" data-unship="${a.id}" title="Odebrat ze svozu">✕</button>`}</td></tr>`).join('')}
         <tr class="total"><td colspan="3" class="hide-m"><b>Celkem</b></td><td class="num"><b>${eur(sumEur(list))}</b></td><td></td></tr>
       </tbody></table></div>` : '<div class="small muted">Zatím žádný AUF.</div>'}
-      <div class="row" style="margin-top:12px">
-        ${unassigned.length ? `<select data-addauf="${s.id}" style="max-width:320px"><option value="">＋ Přidat AUF…</option>${unassigned.map(a => `<option value="${a.id}">AUF ${esc(a.aufNumber)} · ${esc(supName(a.supplierId))} · ${eur(a.amount)}</option>`).join('')}</select>` : ''}
+      <div class="row" style="margin-top:12px;flex-wrap:wrap">
+        ${!s.deliveredAt && unassigned.length ? `<select data-addauf="${s.id}" style="max-width:320px"><option value="">＋ Přidat AUF…</option>${unassigned.map(a => `<option value="${a.id}">AUF ${esc(a.aufNumber)} · ${esc(supName(a.supplierId))} · ${eur(a.amount)}</option>`).join('')}</select>` : ''}
         <span class="grow"></span>
-        ${list.length ? `<button class="btn sm" data-shipmsg="${s.id}">💬 Zpráva pro sklad</button>` : ''}
-        ${s.date ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(gcalLink({ title: details.title, date: s.date, details: details.text }))}">📅 Přidat do Google</a>` : ''}
-        <button class="icon-btn" data-editship="${s.id}" title="Upravit">✎</button><button class="icon-btn" data-delship="${s.id}" title="Smazat svoz">🗑</button>
+        ${list.length ? `<button class="btn sm ${due ? 'primary' : ''}" data-deliver="${s.id}">${s.deliveredAt ? '✎ Stav doručení' : '✓ Svoz doručen'}</button>` : ''}
+        ${!s.deliveredAt && list.length ? `<button class="btn sm ghost" data-shipmsg="${s.id}">💬 Zpráva pro sklad</button>` : ''}
+        ${!s.deliveredAt && s.date ? `<a class="btn sm ghost" target="_blank" rel="noopener" href="${esc(gcalLink({ title: details.title, date: s.date, details: details.text }))}">📅 Google</a>` : ''}
+        <button class="icon-btn" data-editship="${s.id}" title="Upravit">✎</button>${s.deliveredAt ? '' : `<button class="icon-btn" data-delship="${s.id}" title="Smazat svoz">🗑</button>`}
       </div>
     </div>`;
   };
   return `
-    <div class="row" style="margin-bottom:14px"><button class="btn primary" data-editship="">＋ Nový svoz</button><span class="small muted">Termíny svozů se automaticky propisují do kalendáře SmartJoi.</span></div>
-    <div class="card">
+    <div class="row" style="margin-bottom:14px"><button class="btn primary" data-editship="">＋ Nový svoz</button><span class="small muted">Termíny svozů se propisují do kalendáře SmartJoi. Po příjezdu klikni na „✓ Svoz doručen“ — objednávky se přesunou mezi vyřízené.</span></div>
+    ${unassigned.length ? `<div class="card">
       <div class="card-head"><div><h2 style="margin:0">AUFy bez svozu</h2><div class="sub">Potvrzené objednávky u dodavatelů, které ještě nejsou naplánované.</div></div>
         <div class="auf-no"><div class="sub">${plural(unassigned.length, 'AUF', 'AUFy', 'AUFů')}</div><b>${eur(sumEur(unassigned))}</b></div></div>
-      ${unassigned.length ? `<div class="table-wrap"><table><tbody>${unassigned.map(a => `<tr><td><b>${esc(a.aufNumber)}</b></td><td>${flag(supplierById(a.supplierId)?.country)} ${esc(supName(a.supplierId))}</td>
+      <div class="table-wrap"><table><tbody>${unassigned.map(a => `<tr><td><b>${esc(a.aufNumber)}</b></td><td>${flag(supplierById(a.supplierId)?.country)} ${esc(supName(a.supplierId))}</td>
         <td class="hide-m"><a href="#/objednavky/o/${encodeURIComponent(a.orderCode)}">${esc(a.orderCode)}</a></td><td class="num">${eur(a.amount)}</td>
-        <td style="width:200px"><select data-aufship="${a.id}"><option value="">— do svozu —</option>${S.shipments.map(x => `<option value="${x.id}">${x.ref ? esc(x.ref) + ' · ' : ''}${esc(fmtDay(x.date))}</option>`).join('')}<option value="__new">＋ Nový svoz…</option></select></td></tr>`).join('')}</tbody></table></div>` : '<div class="small muted">Vše je naplánované.</div>'}
-    </div>
-    ${upcoming.map(shipCard).join('') || '<div class="card empty">Žádný naplánovaný svoz.</div>'}
-    ${past.length ? `<div class="row" style="margin:6px 0 12px"><button class="btn sm ghost" data-togglepast>${ui.showPast ? 'Skrýt' : 'Zobrazit'} proběhlé svozy (${past.length})</button></div>${ui.showPast ? past.map(shipCard).join('') : ''}` : ''}`;
+        <td style="width:200px"><select data-aufship="${a.id}"><option value="">— do svozu —</option>${open.map(x => `<option value="${x.id}">${x.ref ? esc(x.ref) + ' · ' : ''}${esc(fmtDay(x.date))}</option>`).join('')}<option value="__new">＋ Nový svoz…</option></select></td></tr>`).join('')}</tbody></table></div>
+    </div>` : ''}
+    <div class="ogroup-h" style="margin-top:4px"><span>🚚 Na cestě</span><span class="muted">${open.length}</span></div>
+    ${open.map(shipCard).join('') || '<div class="card empty fadein"><div class="big">🛣</div>Žádný svoz na cestě.</div>'}
+    ${delivered.length ? `<div class="ogroup-h" style="margin-top:18px"><span>📦 Doručené svozy</span><span class="muted">${delivered.length}</span></div>
+      <div class="card olist-card"><div class="olist">${(ui.showPast ? delivered : delivered.slice(0, 6)).map((x, k) => { const L = aufsInShipment(x.id), iss = L.filter(isIssue); ui.shipOpen ||= {};
+        return `<div class="orow shrow ${iss.length ? 'st-issue' : 'st-delivered'}" style="--i:${k}" data-shipx="${x.id}"><div class="grow"><b>📦 ${x.ref ? esc(x.ref) + ' · ' : ''}${esc(fmtDay(x.date))}</b>
+          <div class="sub">doručeno ${esc(fmtDate(x.deliveredAt, false))} · ${plural(L.length, 'AUF', 'AUFy', 'AUFů')} · ${eur(sumEur(L))}</div>
+          ${iss.length ? `<div class="oissue">⚠ ${iss.map(a => `AUF ${esc(a.aufNumber)}: ${esc(DELIVERY[a.delivery][0])}${a.deliveryNote ? ' – ' + esc(a.deliveryNote) : ''}`).join(' · ')}</div>` : ''}</div>
+          <span class="badge ${iss.length ? 'bad' : 'ok'}">${iss.length ? plural(iss.length, 'problém', 'problémy', 'problémů') : '✓ v pořádku'}</span><span class="chev" style="${ui.shipOpen[x.id] ? 'transform:rotate(90deg)' : ''}">›</span></div>
+          ${ui.shipOpen[x.id] ? `<div class="ship-exp">${shipCard(x, 0)}</div>` : ''}`; }).join('')}</div></div>
+      ${delivered.length > 6 ? `<div class="row" style="margin:6px 0 12px"><button class="btn sm ghost" data-togglepast>${ui.showPast ? 'Zobrazit méně' : `Zobrazit všechny doručené (${delivered.length})`}</button></div>` : ''}` : ''}`;
+}
+// převzetí svozu: stav každého AUFu (v pořádku / reklamace / chybí / poškozené / jiný problém) + poznámka
+function deliverShipment(id) {
+  const s = shipmentById(id), list = aufsInShipment(id);
+  const day = s.deliveredAt ? String(s.deliveredAt).slice(0, 10) : todayIso();
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:720px">
+    <div class="modal-head"><h2>📦 Převzetí svozu ${s.ref ? esc(s.ref) : ''}</h2><button class="icon-btn" data-close>✕</button></div>
+    <label class="field" style="max-width:220px"><span>Datum doručení</span><input type="date" id="dv-date" value="${esc(day)}"></label>
+    <div class="small muted" style="margin:10px 0 6px">U každého AUFu vyber stav. Co je v pořádku, nech jak je — problémy (reklamace…) zůstanou v přehledu objednávek, dokud je neoznačíš jako vyřešené.</div>
+    <div class="dv-list">${list.map(a => `<div class="dv-row" data-dvrow="${a.id}">
+      <div class="dv-what"><b>AUF ${esc(a.aufNumber)}</b><div class="sub">${flag(supplierById(a.supplierId)?.country)} ${esc(supName(a.supplierId))} · obj. ${esc(a.orderCode)}</div></div>
+      <div class="chips dv-st">${Object.entries(DELIVERY).map(([k, [l, cls, ic]]) => `<button type="button" class="chip ${(a.delivery || 'ok') === k ? 'on' : ''} ${cls}" data-dvst="${k}">${ic} ${l}</button>`).join('')}</div>
+      <input type="text" class="dv-note" placeholder="Poznámka (např. 2 prkna poškozená, chybí 1 balení…)" value="${esc(a.deliveryNote)}">
+    </div>`).join('')}</div>
+    <div class="modal-foot">${s.deliveredAt ? '<button class="btn ghost danger" id="dv-undo">Zrušit doručení</button>' : ''}<span class="grow"></span><button class="btn ghost" data-close>Zavřít</button><button class="btn primary" id="dv-save">✓ Uložit doručení</button></div>
+  </div></div>`;
+  const root = $('#modal-root');
+  root.querySelectorAll('[data-close]').forEach(b => b.onclick = closeModal);
+  root.querySelectorAll('.dv-st').forEach(g => g.querySelectorAll('[data-dvst]').forEach(b => b.onclick = () => { g.querySelectorAll('.chip').forEach(x => x.classList.remove('on')); b.classList.add('on'); }));
+  $('#dv-save').onclick = () => {
+    const when = new Date(($('#dv-date').value || todayIso()) + 'T12:00:00').toISOString();
+    const rows = [...root.querySelectorAll('[data-dvrow]')].map(r => ({ id: r.dataset.dvrow, st: r.querySelector('.dv-st .on')?.dataset.dvst || 'ok', note: r.querySelector('.dv-note').value.trim() }));
+    closeModal();
+    act(async () => {
+      ok(await sb.from('shipments').update({ delivered_at: when }).eq('id', id));
+      for (const x of rows) { const a = aufById(x.id); ok(await sb.from('aufs').update({ delivered_at: a.deliveredAt || when, delivery_status: x.st, delivery_note: x.note, issue_resolved_at: x.st === 'ok' && isIssue(a) ? new Date().toISOString() : (x.st === 'ok' ? a.resolvedAt : null), updated_at: new Date().toISOString() }).eq('id', x.id)); }
+    }, rows.some(x => x.st !== 'ok') ? 'Uloženo — problémy jsou v přehledu ⚠' : 'Svoz doručen ✓');
+  };
+  if ($('#dv-undo')) $('#dv-undo').onclick = () => { if (!confirm('Vrátit svoz mezi nedoručené?')) return; closeModal(); act(async () => {
+    ok(await sb.from('shipments').update({ delivered_at: null }).eq('id', id));
+    ok(await sb.from('aufs').update({ delivered_at: null, delivery_status: '', issue_resolved_at: null }).eq('shipment_id', id));
+  }, 'Doručení zrušeno'); };
 }
 function shipmentDetails(s) {
   const list = aufsInShipment(s.id);
@@ -2537,9 +2638,20 @@ function editProduct(code) {
 }
 
 // ---------- bindings (záložky) ----------
+// čísla v dlaždicích naběhnou od nuly (jen poprvé po otevření)
+function animateCounts(root) {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches || ui._counted) return;
+  ui._counted = true;
+  root.querySelectorAll('[data-count]').forEach(el => { const n = +el.dataset.count; if (!n) return; const t0 = performance.now(), d = 600;
+    const step = t => { const k = Math.min(1, (t - t0) / d); el.textContent = Math.round(n * (1 - Math.pow(1 - k, 3))); if (k < 1) requestAnimationFrame(step); }; el.textContent = '0'; requestAnimationFrame(step); });
+}
 function bind() {
   const V = $('#view');
-  V.querySelectorAll('[data-ofilter]').forEach(b => b.onclick = () => { ui.orderFilter = b.dataset.ofilter; ui.orderSearch = ''; render(); });
+  V.querySelectorAll('[data-ofilter]').forEach(b => b.onclick = () => { ui.orderFilter = b.dataset.ofilter; ui.orderSearch = ''; ui.orderState = ''; render(); });
+  V.querySelectorAll('[data-ostate]').forEach(b => b.onclick = e => { e.preventDefault(); const k = b.dataset.ostate; if (k === 'delivered') { ui.orderFilter = 'done'; ui.orderState = ''; } else { ui.orderFilter = 'active'; ui.orderState = ui.orderState === k ? '' : k; } ui.orderSearch = ''; render(); });
+  V.querySelectorAll('[data-deliver]').forEach(b => b.onclick = e => { e.preventDefault(); deliverShipment(b.dataset.deliver); });
+  V.querySelectorAll('[data-shipx]').forEach(r => r.onclick = () => { ui.shipOpen ||= {}; ui.shipOpen[r.dataset.shipx] = !ui.shipOpen[r.dataset.shipx]; render(); });
+  animateCounts(V);
   const os = $('#o-search');
   if (os) os.oninput = () => { ui.orderSearch = os.value; const pos = os.selectionStart; render(); const n = $('#o-search'); n.focus(); n.setSelectionRange(pos, pos); };
   V.querySelectorAll('[data-neworder]').forEach(b => b.onclick = () => editManualOrder(''));
