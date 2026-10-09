@@ -1,9 +1,9 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261007b';
-import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261007b';
-import * as SU from './stockupdate-core.js?v=20261007b';
+import * as DC from './dochazka-core.js?v=20261009a';
+import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261009a';
+import * as SU from './stockupdate-core.js?v=20261009a';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -99,7 +99,7 @@ async function fetchAll(table, build = q => q) {
 }
 async function loadState() {
   const since = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock, attEmps, attMonths, aiMem, attHol, suCfg, suRuns] = await Promise.all([
+  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock, attEmps, attMonths, aiMem, attHol, suCfg, suRuns, reps] = await Promise.all([
     sb.from('settings').select('*').eq('id', 1).single().then(ok),
     fetchAll('suppliers', q => q.order('name')),
     fetchAll('products', q => q.order('code')),
@@ -116,6 +116,7 @@ async function loadState() {
     fetchAll('att_holidays', q => q.order('date')).catch(() => []),
     fetchAll('su_config', q => q.order('id')).catch(() => []),
     fetchAll('su_runs', q => q.order('week', { ascending: false })).catch(() => []),
+    fetchAll('reports', q => q.order('period', { ascending: false })).catch(() => []),
   ]);
   const products = {};
   for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name, nameEn: p.name_en || '', nameEnSrc: p.name_en_src || '', mpn: p.mpn || '', shoptetSupplier: p.shoptet_supplier || '' };
@@ -136,6 +137,7 @@ async function loadState() {
       holidays: attHol.map(h => ({ date: String(h.date).slice(0, 10), name: h.name })),
     },
     su: suCfg.map(c => ({ ...c, reserve: Number(c.reserve), mappings: c.mappings || {} })),
+    reports: reps,
     suRuns: suRuns.map(r => ({ ...r, week: String(r.week).slice(0, 10) })),
     emails: emails.map(e => ({ id: e.id, title: e.title, category: e.category || '', to: e.to_addr || '', cc: e.cc || '', subject: e.subject || '', body: e.body || '', note: e.note || '', pinned: !!e.pinned, useCount: e.use_count || 0, lastUsed: e.last_used_at, updatedAt: e.updated_at })),
     sync: { fetchedAt: st.last_sync_at, error: st.last_sync_error, errorAt: st.last_sync_error_at, headers: st.sync_headers || [], rowCount: st.sync_row_count, sample: st.sync_sample || [], statuses: st.sync_statuses || {} },
@@ -229,6 +231,7 @@ function render() {
     crumb.innerHTML = `<span>/</span><a href="#/dochazka">DocházkoBot</a>${e ? `<span>/</span><b>${esc(e.name)}</b>` : ''}`;
     return renderAttApp(e ? e.id : '');
   }
+  if (r.app === 'reporty') { const site = RJ_SITES.some(x => x[0] === r.tab) ? r.tab : (ui.rjSite || 'cz'); crumb.innerHTML = `<span>/</span><a href="#/reporty/${site}">ReportJoi</a>${r.id && /^\d{4}-\d{2}$/.test(r.id) ? `<span>/</span><b>${esc(rjLabel(r.id))}</b>` : ''}`; return renderReportApp(site, r.id); }
   if (r.app === 'stockupdate') { crumb.innerHTML = `<span>/</span><a href="#/stockupdate">StockUpdate 1.0</a>${r.tab === 'w' && r.id ? `<span>/</span><b>${weekLabel(mondayOf(r.id))}</b>` : ''}`; return renderSuApp(r.tab === 'w' ? r.id : ''); }
   if (r.app === 'sklad') {
     const it = r.tab === 'p' ? stItem(r.id) : null;
@@ -289,6 +292,12 @@ function renderHub() {
         <h3>StockUpdate 1.0</h3>
         <p>Každé pondělí: sklad Gunrebenu z PDF → import skladu do Shoptetu (s rezervou). WPC prkna a vinyl, s historií po týdnech.</p>
         <div class="badge-row">${(() => { const w = mondayOf(); return `<span class="badge">${weekLabel(w)}</span>` + suCfgs().map(c => { const r = suRun(c.id, w); return `<span class="badge ${r ? (r.imported_at ? 'ok' : 'warn') : ''}">${esc(c.label)}: ${r ? (r.imported_at ? '✓ v Shoptetu' : 'připraveno') : 'čeká'}</span>`; }).join(''); })()}</div>
+      </a>
+      <a class="app-card" href="#/reporty">
+        <div class="row"><div class="app-icon">📊</div><span class="num grow" style="text-align:right">06</span></div>
+        <h3>ReportJoi</h3>
+        <p>Měsíční reporty Vinylor.cz a Vinylor.sk — otevřeš je tady, každý má svůj odkaz.</p>
+        <div class="badge-row">${(() => { const l = [...S.reports].sort((a, b) => b.period.localeCompare(a.period))[0]; return l ? `<span class="badge info">nejnovější: ${esc(rjLabel(l.period))}</span><span class="badge">${plural(S.reports.length, 'report', 'reporty', 'reportů')}</span>` : '<span class="badge">zatím žádný report</span>'; })()}</div>
       </a>
       <a class="app-card" href="#/kalendar">
         <div class="row"><div class="app-icon">📅</div><span class="num grow" style="text-align:right">SmartJoi</span></div>
@@ -372,6 +381,109 @@ async function pdfToText(buf) {
   }
   return out;
 }
+// ---------- APLIKACE 06: REPORTJOI ----------
+// Měsíční reporty (HTML) pro vinylor.cz / vinylor.sk: uložené v Supabase Storage (bucket „reports“), každý má svůj odkaz #/reporty/cz/2026-09
+const RJ_SITES = [['cz', 'Vinylor.cz', '🇨🇿'], ['sk', 'Vinylor.sk', '🇸🇰']];
+const RJ_MONTHS = ['leden', 'únor', 'březen', 'duben', 'květen', 'červen', 'červenec', 'srpen', 'září', 'říjen', 'listopad', 'prosinec'];
+const RJ_MON_RE = [/leden|ledna|january|janu/, /únor|unor|února|febru/, /březen|brezen|března|march/, /duben|dubna|april/, /květen|kveten|května|may\b/, /červen(?!ec)|cerven(?!ec)|června|june/, /červenec|cervenec|července|july/, /srpen|srpna|august/, /září|zari|september/, /říjen|rijen|října|october/, /listopad|listopadu|november/, /prosinec|prosince|december/];
+const rj = { cache: {}, year: null };
+const rjLabel = p => { const [y, m] = p.split('-').map(Number); const n = RJ_MONTHS[m - 1] || '?'; return `${n[0].toUpperCase() + n.slice(1)} ${y}`; };
+const rjLink = (site, p) => location.origin + location.pathname + `#/reporty/${site}/${p}`;
+const rjList = site => S.reports.filter(r => r.site === site).sort((a, b) => b.period.localeCompare(a.period));
+// z názvu „Report září 2026 — vinylor.cz“ (nebo názvu souboru) pozná měsíc a e-shop
+function rjDetect(html, fileName) {
+  const title = (/<title>([^<]*)<\/title>/i.exec(html) || [])[1] || '';
+  const t = (title + ' ' + fileName).toLowerCase();
+  const site = /vinylor\.?sk|\.sk\b|_sk\b|-sk\b/.test(t) ? 'sk' : 'cz';
+  const years = [...t.matchAll(/20\d{2}/g)].map(m => +m[0]);
+  const mi = RJ_MON_RE.findIndex(re => re.test(t));
+  const year = years.length ? Math.max(...years) : null;
+  return { site, title: title.trim() || fileName, period: mi >= 0 && year ? `${year}-${String(mi + 1).padStart(2, '0')}` : '' };
+}
+async function rjUpload(files, siteHint) {
+  let n = 0;
+  for (const f of files) {
+    if (!/\.html?$/i.test(f.name)) { toast(`${f.name}: nahraj report jako .html`); continue; }
+    const html = await f.text(); const d = rjDetect(html, f.name);
+    if (!/vinylor\.(cz|sk)/i.test(d.title + f.name)) d.site = siteHint;
+    if (!d.period) { const p = prompt(`Za jaký měsíc je report „${d.title}“? (RRRR-MM)`, ''); if (!p || !/^\d{4}-\d{2}$/.test(p.trim())) continue; d.period = p.trim(); }
+    const ex = S.reports.find(r => r.site === d.site && r.period === d.period);
+    if (ex && !confirm(`Report ${rjLabel(d.period)} (${d.site.toUpperCase()}) už existuje. Nahradit?`)) continue;
+    const path = `${d.site}/${d.period}.html`;
+    const { error } = await sb.storage.from('reports').upload(path, new Blob([html], { type: 'text/html;charset=utf-8' }), { upsert: true, contentType: 'text/html;charset=utf-8' });
+    if (error) { toast('Chyba nahrávání: ' + error.message); continue; }
+    const { error: e2 } = await sb.from('reports').upsert({ site: d.site, period: d.period, title: d.title, path, size: f.size, uploaded_at: new Date().toISOString() }, { onConflict: 'site,period' });
+    if (e2) { toast('Chyba: ' + e2.message); continue; }
+    delete rj.cache[path]; n++;
+  }
+  if (n) { await loadState(); toast(`Nahráno ${plural(n, 'report', 'reporty', 'reportů')} ✓`); }
+  render();
+}
+async function rjHtml(r) {
+  if (rj.cache[r.path]) return rj.cache[r.path];
+  const { data, error } = await sb.storage.from('reports').download(r.path);
+  if (error) throw new Error(error.message);
+  return (rj.cache[r.path] = await data.text());
+}
+function renderReportApp(siteArg, periodArg) {
+  const site = RJ_SITES.some(s => s[0] === siteArg) ? siteArg : (ui.rjSite || 'cz'); ui.rjSite = site;
+  const list = rjList(site), siteName = RJ_SITES.find(s => s[0] === site)[1];
+  if (periodArg) return renderReportView(site, periodArg);
+  const years = [...new Set(list.map(r => +r.period.slice(0, 4)))].sort((a, b) => b - a);
+  const year = years.includes(rj.year) ? rj.year : years[0] || new Date().getFullYear();
+  const latest = list[0];
+  let h = `
+    <div class="page-head"><div><div class="eyebrow">Aplikace 06 · měsíční reporty</div><h1>ReportJoi</h1></div>
+      <div class="chips">${RJ_SITES.map(([k, l, fl]) => `<button class="chip ${k === site ? 'on' : ''}" data-rjsite="${k}">${fl} ${l} <span class="muted">${rjList(k).length}</span></button>`).join('')}</div></div>`;
+  if (latest) h += `<a class="rj-hero" href="#/reporty/${site}/${latest.period}">
+      <div class="rj-hero-bg"></div>
+      <div class="grow"><div class="eyebrow">Nejnovější report · ${esc(siteName)}</div><div class="rj-hero-m">${esc(rjLabel(latest.period))}</div><div class="sub">${esc(latest.title)} · nahráno ${esc(fmtDate(latest.uploaded_at, false))}</div></div>
+      <span class="btn primary">Otevřít report →</span></a>`;
+  h += `<div class="card">
+      <div class="card-head"><div class="row" style="gap:8px;align-items:center">${years.length > 1 ? `<button class="icon-btn" data-rjyear="${year - 1}" ${years.includes(year - 1) ? '' : 'disabled'}>‹</button>` : ''}<h2 style="margin:0">${year}</h2>${years.length > 1 ? `<button class="icon-btn" data-rjyear="${year + 1}" ${years.includes(year + 1) ? '' : 'disabled'}>›</button>` : ''}</div>
+        <span class="small muted">${plural(list.filter(r => r.period.startsWith(year + '-')).length, 'report', 'reporty', 'reportů')}</span></div>
+      <div class="rj-grid">${RJ_MONTHS.map((m, i) => { const p = `${year}-${String(i + 1).padStart(2, '0')}`, r = list.find(x => x.period === p);
+        return r ? `<a class="rj-m has" href="#/reporty/${site}/${p}" style="--i:${i}"><span class="rj-mn">${String(i + 1).padStart(2, '0')}</span><b>${m}</b><span class="sub">${esc(fmtDate(r.uploaded_at, false))}</span></a>`
+          : `<div class="rj-m" style="--i:${i}"><span class="rj-mn">${String(i + 1).padStart(2, '0')}</span><b>${m}</b><span class="sub">—</span></div>`; }).join('')}</div>
+    </div>
+    <label class="imp-drop" id="rj-drop"><input type="file" accept=".html,.htm" multiple hidden><b>＋ Nahrát report (${esc(siteName)})</b><span class="small muted">HTML soubor(y) — měsíc se pozná z názvu reportu („Report září 2026 — vinylor.cz“). Klidně víc najednou.</span></label>`;
+  $('#view').innerHTML = h;
+  document.querySelectorAll('[data-rjsite]').forEach(b => b.onclick = () => { ui.rjSite = b.dataset.rjsite; rj.year = null; location.hash = '#/reporty/' + b.dataset.rjsite; });
+  document.querySelectorAll('[data-rjyear]').forEach(b => b.onclick = () => { rj.year = +b.dataset.rjyear; render(); });
+  const d = $('#rj-drop'), inp = d.querySelector('input');
+  d.ondragover = e => { e.preventDefault(); d.classList.add('over'); };
+  d.ondragleave = () => d.classList.remove('over');
+  d.ondrop = e => { e.preventDefault(); d.classList.remove('over'); if (e.dataTransfer.files.length) rjUpload([...e.dataTransfer.files], site); };
+  inp.onchange = () => { if (inp.files.length) rjUpload([...inp.files], site); };
+}
+function renderReportView(site, period) {
+  const list = rjList(site), r = list.find(x => x.period === period);
+  if (!r) { $('#view').innerHTML = `<div class="card empty"><div class="big">📄</div><b>Report ${esc(/^\d{4}-\d{2}$/.test(period) ? rjLabel(period) : period)} pro ${site.toUpperCase()} tu není.</b><div class="small"><a href="#/reporty/${site}">Zpět na reporty</a></div></div>`; return; }
+  const i = list.indexOf(r), newer = list[i - 1], older = list[i + 1];
+  $('#view').innerHTML = `
+    <div class="rj-bar">
+      <a class="btn sm ghost" href="#/reporty/${site}">← Reporty</a>
+      <div class="grow"><b>${esc(rjLabel(period))}</b> <span class="muted small">· ${esc(RJ_SITES.find(s => s[0] === site)[1])}</span></div>
+      ${older ? `<a class="btn sm ghost" href="#/reporty/${site}/${older.period}" title="${esc(rjLabel(older.period))}">‹ ${esc(RJ_MONTHS[+older.period.slice(5) - 1])}</a>` : ''}
+      ${newer ? `<a class="btn sm ghost" href="#/reporty/${site}/${newer.period}" title="${esc(rjLabel(newer.period))}">${esc(RJ_MONTHS[+newer.period.slice(5) - 1])} ›</a>` : ''}
+      <button class="btn sm" id="rj-link" title="Odkaz na tento report (otevře se po přihlášení do SmartJoi)">🔗 Kopírovat odkaz</button>
+      <button class="btn sm ghost" id="rj-full">⛶ Celá obrazovka</button>
+      <button class="btn sm ghost" id="rj-dl">⬇ HTML</button>
+      <button class="icon-btn" id="rj-del" title="Smazat report">🗑</button>
+    </div>
+    <div class="rj-frame-wrap" id="rj-wrap"><div class="empty" id="rj-load"><div class="big spin">◌</div>Načítám report…</div></div>`;
+  rjHtml(r).then(html => {
+    const w = $('#rj-wrap'); if (!w) return;
+    // sandbox bez allow-same-origin: skripty reportu (grafy) běží, ale nemají přístup k SmartJoi
+    w.innerHTML = '<iframe id="rj-frame" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" title="Report"></iframe>';
+    $('#rj-frame').srcdoc = html;
+  }, e => { const l = $('#rj-load'); if (l) l.innerHTML = 'Chyba: ' + esc(e.message); });
+  $('#rj-link').onclick = () => copyText(rjLink(site, period));
+  $('#rj-full').onclick = () => { const w = $('#rj-wrap'); (w.requestFullscreen || w.webkitRequestFullscreen)?.call(w); };
+  $('#rj-dl').onclick = async () => { const html = await rjHtml(r); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' })); a.download = fileSafe(`Report ${rjLabel(period)} vinylor ${site}`) + '.html'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); };
+  $('#rj-del').onclick = () => { if (!confirm(`Smazat report ${rjLabel(period)}?`)) return; act(async () => { await sb.storage.from('reports').remove([r.path]); ok(await sb.from('reports').delete().eq('id', r.id)); }, 'Smazáno').then(() => { location.hash = '#/reporty/' + site; }); };
+}
+
 // ---------- APLIKACE 05: STOCKUPDATE ----------
 // Po týdnech (každé pondělí): PDF se skladem dodavatele + CSV export ze Shoptetu → CSV pro import skladu do Shoptetu.
 // Každý týden a seznam (WPC, vinyl) = jeden záznam v su_runs (uložené vstupy → výsledek jde kdykoli znovu spočítat a stáhnout).
