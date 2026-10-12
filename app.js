@@ -1,9 +1,9 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261009a';
-import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261009a';
-import * as SU from './stockupdate-core.js?v=20261009a';
+import * as DC from './dochazka-core.js?v=20261012a';
+import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261012a';
+import * as SU from './stockupdate-core.js?v=20261012a';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -99,7 +99,7 @@ async function fetchAll(table, build = q => q) {
 }
 async function loadState() {
   const since = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock, attEmps, attMonths, aiMem, attHol, suCfg, suRuns, reps] = await Promise.all([
+  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock, attEmps, attMonths, aiMem, attHol, suCfg, suRuns, reps, vehs, vevs] = await Promise.all([
     sb.from('settings').select('*').eq('id', 1).single().then(ok),
     fetchAll('suppliers', q => q.order('name')),
     fetchAll('products', q => q.order('code')),
@@ -117,6 +117,8 @@ async function loadState() {
     fetchAll('su_config', q => q.order('id')).catch(() => []),
     fetchAll('su_runs', q => q.order('week', { ascending: false })).catch(() => []),
     fetchAll('reports', q => q.order('period', { ascending: false })).catch(() => []),
+    fetchAll('vehicles', q => q.order('sort').order('name')).catch(() => null),
+    fetchAll('vehicle_events', q => q.order('done_on')).catch(() => []),
   ]);
   const products = {};
   for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name, nameEn: p.name_en || '', nameEnSrc: p.name_en_src || '', mpn: p.mpn || '', shoptetSupplier: p.shoptet_supplier || '' };
@@ -138,6 +140,8 @@ async function loadState() {
     },
     su: suCfg.map(c => ({ ...c, reserve: Number(c.reserve), mappings: c.mappings || {} })),
     reports: reps,
+    vehicles: vehs && vehs.map(v => ({ ...v, km: v.km == null ? null : Number(v.km), km_at: v.km_at ? String(v.km_at).slice(0, 10) : null })),
+    vehicleEvents: vevs.map(e => ({ ...e, done_on: e.done_on ? String(e.done_on).slice(0, 10) : null, valid_until: e.valid_until ? String(e.valid_until).slice(0, 10) : null, km: e.km == null ? null : Number(e.km), next_km: e.next_km == null ? null : Number(e.next_km), cost: e.cost == null ? null : Number(e.cost) })),
     suRuns: suRuns.map(r => ({ ...r, week: String(r.week).slice(0, 10) })),
     emails: emails.map(e => ({ id: e.id, title: e.title, category: e.category || '', to: e.to_addr || '', cc: e.cc || '', subject: e.subject || '', body: e.body || '', note: e.note || '', pinned: !!e.pinned, useCount: e.use_count || 0, lastUsed: e.last_used_at, updatedAt: e.updated_at })),
     sync: { fetchedAt: st.last_sync_at, error: st.last_sync_error, errorAt: st.last_sync_error_at, headers: st.sync_headers || [], rowCount: st.sync_row_count, sample: st.sync_sample || [], statuses: st.sync_statuses || {} },
@@ -232,6 +236,7 @@ function render() {
     return renderAttApp(e ? e.id : '');
   }
   if (r.app === 'reporty') { const site = RJ_SITES.some(x => x[0] === r.tab) ? r.tab : (ui.rjSite || 'cz'); crumb.innerHTML = `<span>/</span><a href="#/reporty/${site}">ReportJoi</a>${r.id && /^\d{4}-\d{2}$/.test(r.id) ? `<span>/</span><b>${esc(rjLabel(r.id))}</b>` : ''}`; return renderReportApp(site, r.id); }
+  if (r.app === 'autopark') { const v = r.tab === 'v' && S.vehicles ? apVehicle(r.id) : null; crumb.innerHTML = `<span>/</span><a href="#/autopark">AutoPark</a>${v ? `<span>/</span><b>${esc(v.name)}</b>` : r.tab === 'plan' ? '<span>/</span><b>Plán roku</b>' : ''}`; return renderApApp(r.tab, r.id); }
   if (r.app === 'stockupdate') { crumb.innerHTML = `<span>/</span><a href="#/stockupdate">StockUpdate 1.0</a>${r.tab === 'w' && r.id ? `<span>/</span><b>${weekLabel(mondayOf(r.id))}</b>` : ''}`; return renderSuApp(r.tab === 'w' ? r.id : ''); }
   if (r.app === 'sklad') {
     const it = r.tab === 'p' ? stItem(r.id) : null;
@@ -299,6 +304,12 @@ function renderHub() {
         <p>Měsíční reporty Vinylor.cz a Vinylor.sk — otevřeš je tady, každý má svůj odkaz.</p>
         <div class="badge-row">${(() => { const l = [...S.reports].sort((a, b) => b.period.localeCompare(a.period))[0]; return l ? `<span class="badge info">nejnovější: ${esc(rjLabel(l.period))}</span><span class="badge">${plural(S.reports.length, 'report', 'reporty', 'reportů')}</span>` : '<span class="badge">zatím žádný report</span>'; })()}</div>
       </a>
+      <a class="app-card" href="#/autopark">
+        <div class="row"><div class="app-icon">🚗</div><span class="num grow" style="text-align:right">07</span></div>
+        <h3>AutoPark</h3>
+        <p>Evidence vozidel — STK, dálniční známky, pojištění, olej a servisní historie. Termíny hlídá a dává do kalendáře.</p>
+        <div class="badge-row">${(() => { if (!S.vehicles) return '<span class="badge">nenačteno</span>'; const c = apCounts(); return `<span class="badge">${plural(apActive().length, 'vozidlo', 'vozidla', 'vozidel')}</span>${c.bad ? `<span class="badge bad"><span class="dot"></span>${c.bad} po termínu</span>` : ''}${c.warn ? `<span class="badge warn"><span class="dot"></span>${c.warn} do 30 dní</span>` : ''}${!c.bad && !c.warn ? '<span class="badge ok"><span class="dot"></span>Vše platné</span>' : ''}`; })()}</div>
+      </a>
       <a class="app-card" href="#/kalendar">
         <div class="row"><div class="app-icon">📅</div><span class="num grow" style="text-align:right">SmartJoi</span></div>
         <h3>Kalendář</h3>
@@ -308,7 +319,7 @@ function renderHub() {
       <div class="app-card soon">
         <div class="row"><div class="app-icon">＋</div></div>
         <h3>Další aplikace</h3>
-        <p>Místo pro další nástroj — reporty, reklamace…</p>
+        <p>Místo pro další nástroj — reklamace…</p>
       </div>
     </div>
     <div class="footer">SmartJoi · Jointshon | FJ</div>`;
@@ -332,7 +343,7 @@ export const SJCalendar = {
 function renderCalendar() {
   const up = S.events.filter(e => e.starts_on >= todayIso());
   const past = S.events.filter(e => e.starts_on < todayIso()).reverse();
-  const APPN = { objednavky: '📦 OrderJoi' };
+  const APPN = { objednavky: '📦 OrderJoi', stockupdate: '🔄 StockUpdate', autopark: '🚗 AutoPark' };
   const row = e => `<tr><td style="white-space:nowrap"><b>${esc(fmtDay(e.starts_on))}</b></td><td>${esc(e.title)}<div class="sub">${esc(APPN[e.app] || e.app)}</div></td>
     <td style="text-align:right"><a class="btn sm" target="_blank" rel="noopener" href="${esc(gcalLink({ title: e.title, date: e.starts_on, details: e.details }))}">＋ Google</a></td></tr>`;
   $('#view').innerHTML = `
@@ -381,6 +392,313 @@ async function pdfToText(buf) {
   }
   return out;
 }
+// ---------- APLIKACE 07: AUTOPARK ----------
+// Evidence vozidel: STK, dálniční známka, pojištění a olej se hlídají (platí do), ostatní servis je historie.
+const AP_KINDS = {
+  stk: { l: 'STK', i: '📋', months: 24, track: true },
+  vignette: { l: 'Dálniční známka', s: 'Známka', i: '🛣️', months: 12, minusDay: true, track: true },
+  insurance: { l: 'Pojištění', i: '🛡️', months: 12, minusDay: true, track: true },
+  oil: { l: 'Výměna oleje', s: 'Olej', i: '🛢️', months: 12, track: true },
+  filters: { l: 'Filtry', i: '🌀' },
+  timing: { l: 'Rozvody', i: '⚙️' },
+  geometry: { l: 'Geometrie', i: '📐' },
+  brakes: { l: 'Brzdy', i: '🛑' },
+  tires: { l: 'Pneumatiky', i: '🛞' },
+  service: { l: 'Servis', i: '🔧' },
+  other: { l: 'Jiné', i: '📝' },
+};
+const AP_TRACK = Object.keys(AP_KINDS).filter(k => AP_KINDS[k].track);
+const AP_FUELS = ['nafta', 'benzín', 'hybrid', 'elektro', 'LPG', 'CNG'];
+const AP_MONTHS = ['leden', 'únor', 'březen', 'duben', 'květen', 'červen', 'červenec', 'srpen', 'září', 'říjen', 'listopad', 'prosinec'];
+const apKind = k => AP_KINDS[k] || { l: k, i: '•' };
+const apD = iso => { if (!iso) return '—'; const [y, m, d] = String(iso).slice(0, 10).split('-'); return `${+d}.${+m}.${y}`; };
+const apKm = n => n == null || n === '' ? '—' : Number(n).toLocaleString('cs-CZ') + ' km';
+const apPlate = (p, big) => { const s = String(p || '').replace(/\s+/g, '').toUpperCase(); const t = s.length === 7 ? s.slice(0, 3) + ' ' + s.slice(3) : s; return `<span class="ap-plate${big ? ' big' : ''}"><i>CZ</i><b>${esc(t || '—')}</b></span>`; };
+const apDays = iso => Math.round((new Date(iso + 'T12:00:00') - new Date(todayIso() + 'T12:00:00')) / 864e5);
+function apAddMonths(iso, n, minusDay) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const last = new Date(y, m - 1 + n + 1, 0).getDate();
+  const x = new Date(y, m - 1 + n, Math.min(d, last), 12);
+  if (minusDay) x.setDate(x.getDate() - 1);
+  return locIso(x);
+}
+const apVehicle = id => S.vehicles.find(v => v.id === id);
+const apActive = () => S.vehicles.filter(v => v.status !== 'sold');
+const apEvents = vid => S.vehicleEvents.filter(e => e.vehicle_id === vid);
+// poslední platnost dané věci (nejpozdější „platí do“)
+function apLast(vid, kind) {
+  return apEvents(vid).filter(e => e.kind === kind && e.valid_until).sort((a, b) => b.valid_until.localeCompare(a.valid_until) || String(b.done_on).localeCompare(String(a.done_on)))[0] || null;
+}
+function apDue(v, kind) {
+  const e = apLast(v.id, kind);
+  if (!e) return { kind, state: 'none', ev: null };
+  const days = apDays(e.valid_until);
+  let state = days < 0 ? 'bad' : days <= 30 ? 'warn' : 'ok';
+  let kmLeft = null;
+  if (kind === 'oil' && e.next_km && v.km) { kmLeft = e.next_km - v.km; if (kmLeft <= 0) state = 'bad'; else if (kmLeft <= 1500 && state === 'ok') state = 'warn'; }
+  return { kind, state, until: e.valid_until, days, ev: e, kmLeft };
+}
+const apAllDue = () => apActive().flatMap(v => AP_TRACK.map(k => ({ v, ...apDue(v, k) }))).filter(d => d.ev);
+const apRel = d => d.days < 0 ? `${plural(-d.days, 'den', 'dny', 'dní')} po termínu` : relDay(d.until);
+function apCounts() {
+  const all = apAllDue();
+  return { bad: all.filter(d => d.state === 'bad').length, warn: all.filter(d => d.state === 'warn').length, next: all.filter(d => d.days >= 0).sort((a, b) => a.days - b.days)[0] || null };
+}
+// návrh nového záznamu po vyřízení
+function apSuggest(v, kind) {
+  const K = apKind(kind), t = todayIso(), last = apLast(v.id, kind);
+  const r = { kind, done_on: t, valid_until: '', km: v.km || '', next_km: '', cost: '', note: '' };
+  if (!K.track) return r;
+  // pojištění navazuje na předchozí období, ostatní běží od dneška
+  const from = kind === 'insurance' && last && last.valid_until >= t ? addDays(last.valid_until, 1) : t;
+  if (kind === 'insurance' && from !== t) r.done_on = from;
+  r.valid_until = apAddMonths(from, K.months, K.minusDay);
+  if (kind === 'oil' && v.km) { const step = last && last.km && last.next_km ? last.next_km - last.km : 15000; r.next_km = Number(v.km) + step; }
+  return r;
+}
+// termíny do společného kalendáře SmartJoi
+async function apSyncCal(vid) {
+  const v = apVehicle(vid);
+  for (const k of AP_TRACK) {
+    const ref = `auto:${vid}:${k}`;
+    const d = v && v.status !== 'sold' ? apDue(v, k) : null;
+    if (!d || !d.ev) { await SJCalendar.remove(ref); continue; }
+    const K = apKind(k);
+    await SJCalendar.upsert({ app: 'autopark', ref, title: `🚗 ${K.s || K.l} · ${v.name} ${v.plate}`, date: d.until,
+      details: `${K.l} — ${v.name} (${v.plate}) platí do ${apD(d.until)}${d.ev.next_km ? ` nebo do ${apKm(d.ev.next_km)}` : ''}.`, url: location.origin + location.pathname + '#/autopark/v/' + vid });
+  }
+}
+async function apSyncAll() {
+  if (ui.apSynced) return; ui.apSynced = true;
+  try { for (const v of S.vehicles) await apSyncCal(v.id); } catch (e) { console.warn('AutoPark kalendář', e); }
+}
+
+function apPill(d) {
+  const K = apKind(d.kind);
+  if (!d.ev) return `<span class="ap-pill none" title="${esc(K.l)}: bez záznamu">${K.i} ${esc(K.s || K.l)} <em>—</em></span>`;
+  return `<span class="ap-pill ${d.state}" title="${esc(K.l)} platí do ${apD(d.until)}">${K.i} ${esc(K.s || K.l)} <em>${apD(d.until)}</em></span>`;
+}
+function apDueRow(d, withCar = true) {
+  const K = apKind(d.kind);
+  return `<div class="ap-due ${d.state}">
+    <span class="ap-due-ic">${K.i}</span>
+    <div class="grow"><b>${esc(K.l)}</b>${withCar ? ` · <a href="#/autopark/v/${d.v.id}">${esc(d.v.name)}</a> ${apPlate(d.v.plate)}` : ''}
+      <div class="sub">platí do <b>${apD(d.until)}</b> · ${esc(apRel(d))}${d.ev.next_km ? ` · nebo do ${apKm(d.ev.next_km)}${d.kmLeft != null ? ` (${d.kmLeft > 0 ? 'zbývá ' + apKm(d.kmLeft) : 'překročeno'})` : ''}` : ''}</div></div>
+    <button class="btn sm" data-apdone="${d.v.id}:${d.kind}">✓ Vyřízeno</button>
+  </div>`;
+}
+
+function renderApApp(tab, id) {
+  if (!S.vehicles) { $('#view').innerHTML = '<div class="card empty">AutoPark se nepodařilo načíst.</div>'; return; }
+  apSyncAll();
+  if (tab === 'v') return renderApVehicle(id);
+  const sold = S.vehicles.filter(v => v.status === 'sold');
+  const T = [['', 'Přehled'], ['plan', 'Plán roku'], ...(sold.length ? [['prodana', `Prodaná <span class="count">${sold.length}</span>`]] : [])];
+  let h = `<div class="page-head"><div><div class="eyebrow">Aplikace 07 · evidence vozidel</div><h1>AutoPark 🚗</h1></div>
+      <button class="btn primary" id="ap-new">＋ Vozidlo</button></div>
+    <div class="tabs">${T.map(([k, l]) => `<button class="tab ${k === tab ? 'active' : ''}" data-aptab="${k}">${l}</button>`).join('')}</div>`;
+  if (tab === 'plan') h += apPlanHtml();
+  else if (tab === 'prodana') h += `<div class="ap-grid">${sold.map(apCardHtml).join('')}</div>`;
+  else h += apOverviewHtml();
+  $('#view').innerHTML = h;
+  document.querySelectorAll('[data-aptab]').forEach(b => b.onclick = () => { location.hash = '#/autopark' + (b.dataset.aptab ? '/' + b.dataset.aptab : ''); });
+  document.querySelectorAll('[data-apyear]').forEach(b => b.onclick = () => { ui.apYear = +b.dataset.apyear; render(); });
+  $('#ap-new').onclick = () => apEditVehicle(null);
+  apBindDone();
+}
+function apBindDone() {
+  document.querySelectorAll('[data-apdone]').forEach(b => b.onclick = () => { const [vid, k] = b.dataset.apdone.split(':'); apEditEvent(vid, null, apSuggest(apVehicle(vid), k)); });
+}
+function apOverviewHtml() {
+  const act = apActive(), c = apCounts();
+  const due = apAllDue().filter(d => d.state !== 'ok' || d.days <= 120).sort((a, b) => a.days - b.days);
+  const owners = [...new Set(act.map(v => v.owner || 'Bez vlastníka'))].sort((a, b) => (/soukrom/i.test(a) - /soukrom/i.test(b)));
+  return `<div class="stats">
+      <div class="stat"><div class="v">${act.length}</div><div class="l">aktivních vozidel</div></div>
+      <div class="stat"><div class="v" style="color:${c.bad ? 'var(--bad)' : 'inherit'}">${c.bad}</div><div class="l">po termínu</div></div>
+      <div class="stat"><div class="v" style="color:${c.warn ? 'var(--warn)' : 'inherit'}">${c.warn}</div><div class="l">do 30 dní</div></div>
+      <div class="stat"><div class="v eur">${c.next ? apD(c.next.until) : '—'}</div><div class="l">${c.next ? esc(`${apKind(c.next.kind).s || apKind(c.next.kind).l} · ${c.next.v.name}`) : 'nejbližší termín'}</div></div>
+    </div>
+    <div class="card"><div class="card-head"><div><h2>Hlídané termíny</h2><div class="sub">STK, dálniční známka, pojištění a olej — po termínu a na 4 měsíce dopředu. Termíny jsou i v kalendáři SmartJoi.</div></div></div>
+      ${due.length ? `<div class="ap-dues">${due.map(d => apDueRow(d)).join('')}</div>` : '<div class="empty">Na 4 měsíce dopředu nic nevyprší. 👌</div>'}
+    </div>
+    ${owners.map(o => `<div class="ogroup-h"><b>${esc(o)}</b><span class="muted small">${plural(act.filter(v => (v.owner || 'Bez vlastníka') === o).length, 'vozidlo', 'vozidla', 'vozidel')}</span></div>
+      <div class="ap-grid">${act.filter(v => (v.owner || 'Bez vlastníka') === o).map(apCardHtml).join('')}</div>`).join('')}`;
+}
+function apCardHtml(v, i = 0) {
+  const ds = AP_TRACK.map(k => apDue(v, k));
+  const worst = ds.some(d => d.state === 'bad') ? 'bad' : ds.some(d => d.state === 'warn') ? 'warn' : 'ok';
+  return `<a class="ap-card ${v.status === 'sold' ? 'sold' : worst}" href="#/autopark/v/${v.id}" style="--i:${i}">
+    <div class="row" style="justify-content:space-between;align-items:flex-start;gap:8px">${apPlate(v.plate)}<span class="ap-fuel">${esc(v.fuel || '')}</span></div>
+    <h3>${esc(v.name)}</h3>
+    <div class="sub">${v.status === 'sold' ? 'prodáno' : v.km ? `${apKm(v.km)}${v.km_at ? ` · k ${apD(v.km_at)}` : ''}` : 'stav km neuveden'}</div>
+    ${v.status === 'sold' ? '' : `<div class="ap-pills">${ds.map(apPill).join('')}</div>`}
+  </a>`;
+}
+function apPlanHtml() {
+  const y = ui.apYear || +todayIso().slice(0, 4);
+  // termíny v roce: současné platnosti + předpokládané další obnovy
+  const items = [];
+  for (const d of apAllDue()) {
+    const K = apKind(d.kind);
+    let u = d.until, guess = false;
+    while (u && u.slice(0, 4) <= String(y)) {
+      if (u.slice(0, 4) === String(y)) items.push({ ...d, until: u, guess });
+      u = apAddMonths(addDays(u, K.minusDay ? 1 : 0), K.months, K.minusDay); guess = true;
+    }
+  }
+  // už obnovené (starší platnosti) — jen pro přehled
+  for (const v of apActive()) for (const k of AP_TRACK) { const last = apLast(v.id, k);
+    for (const e of apEvents(v.id)) if (e.kind === k && e !== last && e.valid_until?.startsWith(String(y))) items.push({ v, kind: k, until: e.valid_until, done: true }); }
+  items.sort((a, b) => a.until.localeCompare(b.until));
+  return `<div class="row" style="justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <div class="chips">${[y - 1, y, y + 1].map(x => `<button class="chip ${x === y ? 'on' : ''}" data-apyear="${x}">${x}</button>`).join('')}</div>
+      <span class="small muted">✓ = už obnoveno · přerušovaně = předpoklad další obnovy · 🛞 přezutí v dubnu a říjnu</span></div>
+    <div class="ap-year">${AP_MONTHS.map((m, i) => {
+      const p = `${y}-${String(i + 1).padStart(2, '0')}`, list = items.filter(d => d.until.startsWith(p));
+      const now = todayIso().startsWith(p);
+      const tire = i === 3 ? '🛞 Přezutí na letní' : i === 9 ? '🛞 Přezutí na zimní' : '';
+      return `<div class="ap-month${now ? ' now' : ''}" style="--i:${i}"><div class="ap-mh"><b>${m}</b><span class="small muted">${list.length || ''}</span></div>
+        ${list.map(d => `<a class="ap-mi ${d.done ? 'done' : d.guess ? 'guess' : d.state}" href="#/autopark/v/${d.v.id}" title="${d.done ? 'obnoveno' : d.guess ? 'předpoklad další obnovy' : ''}"><span>${+d.until.slice(8)}.</span>${d.done ? ' ✓' : ''} ${apKind(d.kind).i} ${esc(apKind(d.kind).s || apKind(d.kind).l)} · ${esc(d.v.name)}</a>`).join('')}
+        ${tire ? `<div class="ap-mi tire">${tire} · všechna auta</div>` : ''}
+        ${!list.length && !tire ? '<div class="small muted">—</div>' : ''}</div>`;
+    }).join('')}</div>`;
+}
+
+function renderApVehicle(id) {
+  const v = apVehicle(id);
+  if (!v) { $('#view').innerHTML = `<div class="card empty"><div class="big">🚗</div><b>Vozidlo nenalezeno.</b><div class="small"><a href="#/autopark">Zpět na AutoPark</a></div></div>`; return; }
+  const f = ui.apKind || '';
+  const evs = apEvents(id).filter(e => !f || e.kind === f).sort((a, b) => String(b.done_on || b.valid_until).localeCompare(String(a.done_on || a.valid_until)));
+  const kinds = [...new Set(apEvents(id).map(e => e.kind))];
+  const sumCost = apEvents(id).reduce((s, e) => s + (Number(e.cost) || 0), 0);
+  $('#view').innerHTML = `
+    <div class="ap-head card">
+      ${apPlate(v.plate, true)}
+      <div class="grow"><h1>${esc(v.name)}</h1>
+        <div class="sub">${esc([v.owner, v.fuel, v.status === 'sold' ? 'prodáno' : ''].filter(Boolean).join(' · '))}${v.vin ? ` · VIN ${esc(v.vin)}` : ''}</div>
+        ${v.note ? `<div class="small" style="margin-top:6px">${esc(v.note)}</div>` : ''}</div>
+      <div class="ap-km"><div class="v">${apKm(v.km)}</div><div class="sub">${v.km_at ? 'k ' + apD(v.km_at) : 'stav tachometru'}</div><button class="btn sm ghost" id="ap-km">Zapsat km</button></div>
+    </div>
+    <div class="row" style="gap:8px;margin-bottom:14px;flex-wrap:wrap"><a class="btn sm ghost" href="#/autopark">← AutoPark</a><span class="grow"></span>
+      <button class="btn sm" id="ap-editv">Upravit vozidlo</button><button class="btn sm primary" id="ap-adde">＋ Záznam</button></div>
+    ${v.status === 'sold' ? '' : `<div class="ap-tiles">${AP_TRACK.map((k, i) => { const d = apDue(v, k), K = apKind(k); return `<div class="ap-tile ${d.state}" style="--i:${i}">
+      <div class="row" style="justify-content:space-between"><span class="small muted">${K.i} ${esc(K.l)}</span>${d.ev ? `<span class="dot"></span>` : ''}</div>
+      <div class="v">${d.ev ? apD(d.until) : '—'}</div>
+      <div class="sub">${d.ev ? esc(apRel(d)) + (d.ev.next_km ? ` · nebo ${apKm(d.ev.next_km)}` : '') : 'bez záznamu'}</div>
+      <button class="btn sm ${d.state === 'bad' || d.state === 'warn' ? 'primary' : 'ghost'}" data-apdone="${v.id}:${k}">✓ Vyřízeno</button></div>`; }).join('')}</div>`}
+    <div class="card"><div class="card-head"><div><h2>Historie</h2><div class="sub">${plural(apEvents(id).length, 'záznam', 'záznamy', 'záznamů')}${sumCost ? ` · náklady celkem ${sumCost.toLocaleString('cs-CZ')} Kč` : ''}</div></div>
+        <div class="chips"><button class="chip ${!f ? 'on' : ''}" data-apk="">Vše</button>${kinds.map(k => `<button class="chip ${f === k ? 'on' : ''}" data-apk="${k}">${apKind(k).i} ${esc(apKind(k).s || apKind(k).l)}</button>`).join('')}</div></div>
+      ${evs.length ? `<div class="table-wrap"><table class="ap-hist"><thead><tr><th>Datum</th><th>Co</th><th>Platí do</th><th>Km</th><th>Cena</th><th>Poznámka</th><th></th></tr></thead><tbody>
+        ${evs.map(e => `<tr><td style="white-space:nowrap">${apD(e.done_on)}</td><td style="white-space:nowrap">${apKind(e.kind).i} ${esc(apKind(e.kind).l)}</td>
+          <td style="white-space:nowrap">${e.valid_until ? apD(e.valid_until) : ''}${e.next_km ? `<div class="sub">nebo ${apKm(e.next_km)}</div>` : ''}</td>
+          <td style="white-space:nowrap">${e.km ? apKm(e.km) : ''}</td><td style="white-space:nowrap">${e.cost != null && e.cost !== '' ? Number(e.cost).toLocaleString('cs-CZ') + ' Kč' : ''}</td>
+          <td class="small">${esc(e.note || '')}</td><td style="text-align:right"><button class="icon-btn" data-ape="${e.id}" title="Upravit">✎</button></td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty">Zatím žádné záznamy.</div>'}
+    </div>`;
+  document.querySelectorAll('[data-apk]').forEach(b => b.onclick = () => { ui.apKind = b.dataset.apk; render(); });
+  document.querySelectorAll('[data-ape]').forEach(b => b.onclick = () => apEditEvent(id, S.vehicleEvents.find(e => e.id === b.dataset.ape)));
+  $('#ap-adde').onclick = () => apEditEvent(id, null, apSuggest(v, 'service'));
+  $('#ap-editv').onclick = () => apEditVehicle(v);
+  $('#ap-km').onclick = () => apEditKm(v);
+  apBindDone();
+}
+
+function apModal(w, html) {
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal" style="max-width:${w}px">${html}</div></div>`;
+  document.querySelectorAll('#modal-root [data-close]').forEach(b => b.onclick = closeModal);
+}
+const apNum = s => { const x = String(s ?? '').replace(/\s/g, '').replace(',', '.'); return x === '' ? null : Number(x); };
+
+function apEditEvent(vid, e, pre) {
+  const v = apVehicle(vid), x = e || pre || apSuggest(v, 'service');
+  let autoUntil = !e;
+  apModal(560, `<div class="modal-head"><h2>${e ? 'Upravit záznam' : 'Nový záznam'} · ${esc(v.name)}</h2><button class="icon-btn" data-close>✕</button></div>
+    <div class="stack">
+      <label class="field"><span>Co se dělalo</span><select id="ape-kind">${Object.entries(AP_KINDS).map(([k, K]) => `<option value="${k}" ${k === x.kind ? 'selected' : ''}>${K.i} ${esc(K.l)}${K.track ? ' (hlídá se)' : ''}</option>`).join('')}</select></label>
+      <div class="grid-2">
+        <label class="field"><span>Datum</span><input type="date" id="ape-done" value="${esc(x.done_on || '')}"></label>
+        <label class="field" id="ape-until-f"><span>Platí do</span><input type="date" id="ape-until" value="${esc(x.valid_until || '')}"></label>
+        <label class="field"><span>Stav km</span><input type="text" inputmode="numeric" id="ape-km" value="${esc(x.km ?? '')}"></label>
+        <label class="field" id="ape-next-f"><span>Další výměna při km</span><input type="text" inputmode="numeric" id="ape-next" value="${esc(x.next_km ?? '')}"></label>
+        <label class="field"><span>Cena (Kč)</span><input type="text" inputmode="decimal" id="ape-cost" value="${esc(x.cost ?? '')}"></label>
+      </div>
+      <label class="field"><span>Poznámka</span><input type="text" id="ape-note" value="${esc(x.note || '')}" placeholder="např. servis, co se měnilo…"></label>
+      <div class="small muted" id="ape-hint"></div>
+    </div>
+    <div class="modal-foot">${e ? '<button class="btn ghost" id="ape-del" style="margin-right:auto;color:var(--bad)">Smazat</button>' : ''}<button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="ape-save">Uložit</button></div>`);
+  const sync = () => {
+    const k = $('#ape-kind').value, K = apKind(k);
+    $('#ape-until-f').style.display = K.track ? '' : 'none';
+    $('#ape-next-f').style.display = k === 'oil' ? '' : 'none';
+    if (K.track && autoUntil && $('#ape-done').value) $('#ape-until').value = apAddMonths($('#ape-done').value, K.months, K.minusDay);
+    $('#ape-hint').textContent = K.track ? `Hlídá se — termín „platí do“ se propíše do přehledu a kalendáře SmartJoi. Výchozí platnost ${plural(K.months, 'měsíc', 'měsíce', 'měsíců')}.` : '';
+  };
+  $('#ape-kind').onchange = () => { if (!e) autoUntil = true; sync(); }; $('#ape-done').onchange = sync;
+  $('#ape-until').oninput = () => { autoUntil = false; };
+  if (!e && !pre?.valid_until) sync(); else { autoUntil = false; sync(); }
+  $('#ape-save').onclick = () => {
+    const k = $('#ape-kind').value, K = apKind(k);
+    const row = { vehicle_id: vid, kind: k, done_on: $('#ape-done').value || null, valid_until: K.track ? ($('#ape-until').value || null) : null,
+      km: apNum($('#ape-km').value), next_km: k === 'oil' ? apNum($('#ape-next').value) : null, cost: apNum($('#ape-cost').value), note: $('#ape-note').value.trim() };
+    if (!row.done_on && !row.valid_until) return toast('Doplň datum');
+    if ([row.km, row.next_km, row.cost].some(n => n != null && !isFinite(n))) return toast('Km a cena musí být čísla');
+    closeModal();
+    act(async () => {
+      ok(e ? await sb.from('vehicle_events').update(row).eq('id', e.id) : await sb.from('vehicle_events').insert(row));
+      if (row.km && (!v.km || row.km > v.km)) ok(await sb.from('vehicles').update({ km: Math.round(row.km), km_at: row.done_on || todayIso(), updated_at: new Date().toISOString() }).eq('id', vid));
+      await loadState(); await apSyncCal(vid);
+    }, 'Uloženo ✓');
+  };
+  if (e) $('#ape-del').onclick = () => { if (!confirm('Smazat tento záznam?')) return; closeModal(); act(async () => { ok(await sb.from('vehicle_events').delete().eq('id', e.id)); await loadState(); await apSyncCal(vid); }, 'Smazáno'); };
+}
+
+function apEditKm(v) {
+  apModal(400, `<div class="modal-head"><h2>Stav tachometru</h2><button class="icon-btn" data-close>✕</button></div>
+    <div class="grid-2"><label class="field"><span>Km</span><input type="text" inputmode="numeric" id="apk-km" value="${esc(v.km ?? '')}"></label>
+      <label class="field"><span>Ke dni</span><input type="date" id="apk-at" value="${todayIso()}"></label></div>
+    <div class="modal-foot"><button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="apk-save">Uložit</button></div>`);
+  $('#apk-km').focus();
+  $('#apk-save').onclick = () => { const km = apNum($('#apk-km').value), at = $('#apk-at').value || todayIso(); if (km == null || !isFinite(km)) return toast('Zadej km'); closeModal();
+    act(async () => ok(await sb.from('vehicles').update({ km: Math.round(km), km_at: at, updated_at: new Date().toISOString() }).eq('id', v.id)), 'Uloženo ✓'); };
+}
+
+function apEditVehicle(v) {
+  const x = v || { name: '', plate: '', fuel: 'nafta', owner: '', status: 'active', km: '', vin: '', note: '' };
+  const owners = [...new Set(S.vehicles.map(y => y.owner).filter(Boolean))];
+  apModal(560, `<div class="modal-head"><h2>${v ? 'Upravit vozidlo' : 'Nové vozidlo'}</h2><button class="icon-btn" data-close>✕</button></div>
+    <div class="stack"><div class="grid-2">
+      <label class="field"><span>Název</span><input type="text" id="apv-name" value="${esc(x.name)}" placeholder="Škoda Octavia"></label>
+      <label class="field"><span>SPZ</span><input type="text" id="apv-plate" value="${esc(x.plate)}" placeholder="1AB2345"></label>
+      <label class="field"><span>Palivo</span><select id="apv-fuel">${[...new Set([...AP_FUELS, x.fuel].filter(Boolean))].map(f => `<option ${f === x.fuel ? 'selected' : ''}>${esc(f)}</option>`).join('')}</select></label>
+      <label class="field"><span>Vlastník</span><input type="text" id="apv-owner" value="${esc(x.owner || '')}" list="apv-owners"><datalist id="apv-owners">${owners.map(o => `<option value="${esc(o)}">`).join('')}</datalist></label>
+      <label class="field"><span>Stav km</span><input type="text" inputmode="numeric" id="apv-km" value="${esc(x.km ?? '')}"></label>
+      <label class="field"><span>Stav</span><select id="apv-status"><option value="active" ${x.status !== 'sold' ? 'selected' : ''}>V provozu</option><option value="sold" ${x.status === 'sold' ? 'selected' : ''}>Prodáno</option></select></label>
+    </div>
+    <label class="field"><span>VIN</span><input type="text" id="apv-vin" value="${esc(x.vin || '')}"></label>
+    <label class="field"><span>Poznámka</span><input type="text" id="apv-note" value="${esc(x.note || '')}"></label></div>
+    <div class="modal-foot">${v ? '<button class="btn ghost" id="apv-del" style="margin-right:auto;color:var(--bad)">Smazat vozidlo</button>' : ''}<button class="btn ghost" data-close>Zrušit</button><button class="btn primary" id="apv-save">Uložit</button></div>`);
+  $('#apv-save').onclick = () => {
+    const km = apNum($('#apv-km').value);
+    const row = { name: $('#apv-name').value.trim(), plate: $('#apv-plate').value.replace(/\s+/g, '').toUpperCase(), fuel: $('#apv-fuel').value, owner: $('#apv-owner').value.trim(),
+      status: $('#apv-status').value, vin: $('#apv-vin').value.trim(), note: $('#apv-note').value.trim(), updated_at: new Date().toISOString() };
+    if (!row.name) return toast('Doplň název');
+    if (km != null && !isFinite(km)) return toast('Km musí být číslo');
+    if (km != null && km !== (v?.km ?? null)) { row.km = Math.round(km); row.km_at = todayIso(); } else if (km == null) row.km = null;
+    if (!v) row.sort = Math.max(0, ...S.vehicles.map(y => y.sort || 0)) + 1;
+    closeModal();
+    act(async () => {
+      if (v) { ok(await sb.from('vehicles').update(row).eq('id', v.id)); await loadState(); await apSyncCal(v.id); }
+      else return ok(await sb.from('vehicles').insert(row).select().single()).id;
+    }, 'Uloženo ✓').then(id => { if (id) location.hash = '#/autopark/v/' + id; });
+  };
+  if (v) $('#apv-del').onclick = () => {
+    if (!confirm(`Smazat ${v.name} (${v.plate}) včetně celé historie? Když auto jen prodáváš, nastav radši stav „Prodáno“.`)) return;
+    closeModal();
+    act(async () => { ok(await sb.from('vehicles').delete().eq('id', v.id)); for (const k of AP_TRACK) await SJCalendar.remove(`auto:${v.id}:${k}`); }, 'Smazáno').then(() => { location.hash = '#/autopark'; });
+  };
+}
+
 // ---------- APLIKACE 06: REPORTJOI ----------
 // Měsíční reporty (HTML) pro vinylor.cz / vinylor.sk: uložené v Supabase Storage (bucket „reports“), každý má svůj odkaz #/reporty/cz/2026-09
 const RJ_SITES = [['cz', 'Vinylor.cz', '🇨🇿'], ['sk', 'Vinylor.sk', '🇸🇰']];
