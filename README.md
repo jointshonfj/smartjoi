@@ -72,3 +72,11 @@ plánovač (každých 15 min), odkaz na CSV export a `config.js`.
 synchronizace se Shoptetem ji nemění. Dokud u ní není odeslaný e-mail, jde smazat.
 
 Když objednávka ve Shoptetu změní stav, v SmartJoi zůstane i s rozpracovanými AUFy, dokud ji nearchivuješ.
+
+
+## Bezpečnost (audit 12. 10. 2026)
+- Všechny tabulky mají RLS, přístup jen pro přihlášené (`authenticated`); soukromé buckety `reports` a `auf-docs`; pohledy `security_invoker`.
+- Veřejný je jen publishable klíč v `config.js` (to je záměr). Tajné klíče (Gemini, DeepL) jsou v Supabase Secrets / nastavení, ne v repu.
+- `shoptet-sync` spustí jen databáze se sdíleným tajemstvím (`private_kv`, nečitelná z prohlížeče). `assistant` ověřuje přihlášeného uživatele. `calendar-ics` chrání tajný token v adrese.
+- `index.html` má Content-Security-Policy (omezuje, kam smí stránka posílat data), knihovny z CDN jsou připnuté na přesnou verzi.
+- Do GitHubu patří jen webové soubory, složka `supabase/` ne.
