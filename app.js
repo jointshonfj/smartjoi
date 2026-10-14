@@ -1,9 +1,9 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261012b';
-import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261012b';
-import * as SU from './stockupdate-core.js?v=20261012b';
+import * as DC from './dochazka-core.js?v=20261014a';
+import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261014a';
+import * as SU from './stockupdate-core.js?v=20261014a';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -250,18 +250,32 @@ function render() {
 }
 
 // ---------- HUB ----------
+const longDay = () => new Date().toLocaleDateString('cs-CZ', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+const greeting = () => { const h = new Date().getHours(); return h < 10 ? 'Dobré ráno.' : h < 18 ? 'Dobrý den.' : 'Dobrý večer.'; };
+// co čeká na pozornost napříč aplikacemi (jen věci, které něco znamenají)
+function hubAttention(c) {
+  const out = [], add = (n, label, href, tone) => { if (n > 0) out.push({ n, label, href, tone }); };
+  add(c.issue, c.issue === 1 ? 'reklamace' : c.issue < 5 ? 'reklamace' : 'reklamací', '#/objednavky', 'bad');
+  add(c.todo, 'k objednání', '#/objednavky', 'warn');
+  add(c.toReceive, c.toReceive === 1 ? 'svoz k převzetí' : 'svozy k převzetí', '#/objednavky/svozy', 'info');
+  if (S.vehicles) { const a = apCounts(); add(a.bad, 'u aut po termínu', '#/autopark', 'bad'); add(a.warn, 'u aut do 30 dní', '#/autopark', 'warn'); }
+  try { const m = ui.attMonth || prevMonth(); const miss = S.att.employees.filter(e => e.active && !attRec(e.id, m)?.entries.length).length; add(miss, `bez docházky za ${monthLabel(m).split(' ')[0]}`, '#/dochazka', 'info'); } catch {}
+  try { const w = mondayOf(); if (suCfgs().length && suCfgs().some(x => !suRun(x.id, w))) add(suCfgs().filter(x => !suRun(x.id, w)).length, 'StockUpdate čeká', '#/stockupdate', 'info'); } catch {}
+  return out;
+}
 function renderHub() {
   const c = counts();
+  const first = !ui.hubSeen; ui.hubSeen = true;
+  const attn = hubAttention(c);
   const next = S.events.filter(e => e.starts_on >= todayIso()).slice(0, 3);
   $('#view').innerHTML = `
     <section class="hero">
-      <div class="eyebrow">Jointshon — FJ · interní nástroje</div>
-      <h1>Systém místo chaosu.</h1>
-      <p>Všechny tvoje pracovní aplikace na jednom místě — na počítači i v telefonu.</p>
+      <h1>${esc(greeting())}</h1>
+      ${attn.length ? `<p>${esc(longDay())} — tohle čeká na tebe:</p><div class="attn">${attn.map(a => `<a class="attn-i ${a.tone}" href="${a.href}"><b>${a.n}</b>${esc(a.label)}</a>`).join('')}</div>` : `<p>${esc(longDay())}</p><div class="attn-ok"><span class="dot"></span>Všechno je vyřízeno.</div>`}
     </section>
-    <div class="apps">
+    <div class="apps${first ? ' lay' : ''}">
       <a class="app-card" href="#/objednavky">
-        <div class="row"><div class="app-icon">📦</div><span class="num grow" style="text-align:right">01</span></div>
+        <div class="row"><div class="app-icon">📦</div></div>
         <h3>OrderJoi</h3>
         <p>Vinylor · objednávky od dodavatelů: Shoptet → e-mail dodavateli → AUF → svoz.</p>
         <div class="badge-row">
@@ -274,53 +288,48 @@ function renderHub() {
         </div>
       </a>
       <a class="app-card" href="#/emaily">
-        <div class="row"><div class="app-icon">✉️</div><span class="num grow" style="text-align:right">02</span></div>
+        <div class="row"><div class="app-icon">✉️</div></div>
         <h3>EmailJoi</h3>
         <p>Často posílané e-maily — adresa, předmět a text připravené ke zkopírování.</p>
         <div class="badge-row"><span class="badge">${plural(S.emails.length, 'šablona', 'šablony', 'šablon')}</span>${S.emails.some(e => e.pinned) ? `<span class="badge info">★ ${S.emails.filter(e => e.pinned).length} připnuté</span>` : ''}</div>
       </a>
       <a class="app-card" href="#/sklad">
-        <div class="row"><div class="app-icon">🏬</div><span class="num grow" style="text-align:right">03</span></div>
+        <div class="row"><div class="app-icon">🏬</div></div>
         <h3>StockJoi</h3>
         <p>Sklad: stav zboží ve více skladech, naskladnění, vyskladnění a přesuny.</p>
         <div class="badge-row">${(() => { const sc = stockCounts(); return `<span class="badge">${plural(sc.items, 'položka', 'položky', 'položek')} · ${plural(activeWhs().length, 'sklad', 'sklady', 'skladů')}</span>${sc.low ? `<span class="badge bad"><span class="dot"></span>${sc.low} pod minimem</span>` : ''}`; })()}</div>
       </a>
       <a class="app-card" href="#/dochazka">
-        <div class="row"><div class="app-icon">🕘</div><span class="num grow" style="text-align:right">04</span></div>
+        <div class="row"><div class="app-icon">🕘</div></div>
         <h3>DocházkoBot</h3>
         <p>Docházka zaměstnanců → podklady pro účetní v Excelu. Čte PDF z docházky, pomáhá SmartJoiAI.</p>
         <div class="badge-row">${(() => { const m = ui.attMonth || prevMonth(); const act = S.att.employees.filter(e => e.active); const done = act.filter(e => attRec(e.id, m)?.status === 'done').length, up = act.filter(e => attRec(e.id, m)?.entries.length).length;
           return `<span class="badge">${esc(monthLabel(m))}: ${up}/${act.length} nahráno</span>${done ? `<span class="badge ok">${done} hotovo</span>` : ''}`; })()}</div>
       </a>
       <a class="app-card" href="#/stockupdate">
-        <div class="row"><div class="app-icon">🔄</div><span class="num grow" style="text-align:right">05</span></div>
+        <div class="row"><div class="app-icon">🔄</div></div>
         <h3>StockUpdate 1.0</h3>
         <p>Každé pondělí: sklad Gunrebenu z PDF → import skladu do Shoptetu (s rezervou). WPC prkna a vinyl, s historií po týdnech.</p>
         <div class="badge-row">${(() => { const w = mondayOf(); return `<span class="badge">${weekLabel(w)}</span>` + suCfgs().map(c => { const r = suRun(c.id, w); return `<span class="badge ${r ? (r.imported_at ? 'ok' : 'warn') : ''}">${esc(c.label)}: ${r ? (r.imported_at ? '✓ v Shoptetu' : 'připraveno') : 'čeká'}</span>`; }).join(''); })()}</div>
       </a>
       <a class="app-card" href="#/reporty">
-        <div class="row"><div class="app-icon">📊</div><span class="num grow" style="text-align:right">06</span></div>
+        <div class="row"><div class="app-icon">📊</div></div>
         <h3>ReportJoi</h3>
         <p>Měsíční reporty Vinylor.cz a Vinylor.sk — otevřeš je tady, každý má svůj odkaz.</p>
         <div class="badge-row">${(() => { const l = [...S.reports].sort((a, b) => b.period.localeCompare(a.period))[0]; return l ? `<span class="badge info">nejnovější: ${esc(rjLabel(l.period))}</span><span class="badge">${plural(S.reports.length, 'report', 'reporty', 'reportů')}</span>` : '<span class="badge">zatím žádný report</span>'; })()}</div>
       </a>
       <a class="app-card" href="#/autopark">
-        <div class="row"><div class="app-icon">🚗</div><span class="num grow" style="text-align:right">07</span></div>
+        <div class="row"><div class="app-icon">🚗</div></div>
         <h3>AutoPark</h3>
         <p>Evidence vozidel — STK, dálniční známky, pojištění, olej a servisní historie. Termíny hlídá a dává do kalendáře.</p>
         <div class="badge-row">${(() => { if (!S.vehicles) return '<span class="badge">nenačteno</span>'; const c = apCounts(); return `<span class="badge">${plural(apActive().length, 'vozidlo', 'vozidla', 'vozidel')}</span>${c.bad ? `<span class="badge bad"><span class="dot"></span>${c.bad} po termínu</span>` : ''}${c.warn ? `<span class="badge warn"><span class="dot"></span>${c.warn} do 30 dní</span>` : ''}${!c.bad && !c.warn ? '<span class="badge ok"><span class="dot"></span>Vše platné</span>' : ''}`; })()}</div>
       </a>
       <a class="app-card" href="#/kalendar">
-        <div class="row"><div class="app-icon">📅</div><span class="num grow" style="text-align:right">SmartJoi</span></div>
+        <div class="row"><div class="app-icon">📅</div></div>
         <h3>Kalendář</h3>
         <p>${next.length ? next.map(e => `<b>${esc(fmtDay(e.starts_on))}</b> · ${esc(e.title)}`).join('<br>') : 'Společný kalendář všech aplikací — propojený s Google Kalendářem.'}</p>
         <div class="badge-row"><span class="badge">${plural(S.events.filter(e => e.starts_on >= todayIso()).length, 'nadcházející událost', 'nadcházející události', 'nadcházejících událostí')}</span></div>
       </a>
-      <div class="app-card soon">
-        <div class="row"><div class="app-icon">＋</div></div>
-        <h3>Další aplikace</h3>
-        <p>Místo pro další nástroj — reklamace…</p>
-      </div>
     </div>
     <div class="footer">SmartJoi · Jointshon | FJ</div>`;
 }
@@ -3133,6 +3142,23 @@ function bind() {
 }
 
 // ---------- login ----------
+// Zámek přihlášení: 3 špatná hesla → minuta pauza, každé další selhání pauzu zvětší (1 min → 5 → 15 → 60).
+// Stav se drží v prohlížeči (přežije obnovení stránky). Je to pojistka proti hádání hesla z této stránky;
+// proti útoku mimo stránku chrání limity a silné heslo/MFA v Supabase.
+const LOCK_FREE = 3, LOCK_STEPS = [60, 300, 900, 3600];
+function mkLock(key) {
+  let mem = { fails: 0, until: 0, level: 0 };
+  const get = () => { try { const j = JSON.parse(localStorage.getItem(key) || 'null'); if (j && typeof j.fails === 'number') return { fails: j.fails | 0, until: +j.until || 0, level: j.level | 0 }; } catch {} return { ...mem }; };
+  const set = st => { mem = { ...st }; try { localStorage.setItem(key, JSON.stringify(st)); } catch {} };
+  return {
+    get, reset: () => set({ fails: 0, until: 0, level: 0 }),
+    left: () => Math.max(0, Math.ceil((get().until - Date.now()) / 1000)),
+    fail() { const st = get(); st.fails++; if (st.fails >= LOCK_FREE) { st.until = Date.now() + LOCK_STEPS[Math.min(st.level, LOCK_STEPS.length - 1)] * 1000; st.level++; st.fails = 0; } set(st); },
+  };
+}
+const loginLock = mkLock('sj-login-lock'), codeLock = mkLock('sj-code-lock');
+const lockLeft = () => loginLock.left(), lockGet = loginLock.get, lockFail = loginLock.fail, lockSet = st => st.fails === 0 && !st.until ? loginLock.reset() : null;
+const lockText = n => n >= 60 ? `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')} min` : `${n} s`;
 function renderLogin(msg = '', email = '') {
   $('#crumb').innerHTML = ''; $('#user').innerHTML = '';
   $('#view').innerHTML = `
@@ -3144,17 +3170,89 @@ function renderLogin(msg = '', email = '') {
       <form id="login" class="card stack" style="margin-top:20px">
         <label class="field"><span>E-mail</span><input type="email" id="l-email" autocomplete="username" required value="${esc(email)}"></label>
         <label class="field"><span>Heslo</span><input type="password" id="l-pass" autocomplete="current-password" required></label>
-        ${msg ? `<div class="notice bad">${esc(msg)}</div>` : ''}
-        <button class="btn primary" style="width:100%">Přihlásit</button>
+        <div class="notice bad" id="l-msg" ${msg ? '' : 'hidden'}>${esc(msg)}</div>
+        <button class="btn primary" id="l-btn" style="width:100%">Přihlásit</button>
       </form>
     </section>`;
+  const btn = $('#l-btn'), box = $('#l-msg');
+  let timer = null;
+  const tick = () => {
+    const n = lockLeft();
+    if (n > 0) { btn.disabled = true; btn.textContent = `Zamčeno · ${lockText(n)}`; box.hidden = false; box.textContent = `Příliš mnoho pokusů. Zkus to znovu za ${lockText(n)}.`; return true; }
+    btn.disabled = false; btn.textContent = 'Přihlásit'; if (timer) { clearInterval(timer); timer = null; if (box.textContent.startsWith('Příliš')) box.hidden = true; } return false;
+  };
+  if (tick()) timer = setInterval(() => { if (!document.body.contains(btn)) return clearInterval(timer); tick(); }, 1000);
   $('#login').onsubmit = async e => {
     e.preventDefault();
-    const btn = e.target.querySelector('button'); btn.disabled = true; btn.textContent = 'Přihlašuji…';
+    if (lockLeft() > 0) return tick();
+    btn.disabled = true; btn.textContent = 'Přihlašuji…';
     const em = $('#l-email').value.trim();
     const { error } = await sb.auth.signInWithPassword({ email: em, password: $('#l-pass').value });
-    if (error) { renderLogin(error.message === 'Invalid login credentials' ? 'Špatný e-mail nebo heslo.' : error.message, em); $('#l-pass').focus(); }
+    if (!error) { lockSet({ fails: 0, until: 0, level: 0 }); return; }
+    if (error.message === 'Invalid login credentials') {
+      lockFail();
+      const n = lockLeft(), left = LOCK_FREE - lockGet().fails;
+      return renderLogin(n > 0 ? `Špatný e-mail nebo heslo. Příliš mnoho pokusů. Zkus to znovu za ${lockText(n)}.` : `Špatný e-mail nebo heslo. Zbývají ${plural(left, 'pokus', 'pokusy', 'pokusů')}.`, em);
+    }
+    renderLogin(error.status === 429 || /rate limit/i.test(error.message) ? 'Příliš mnoho pokusů z této sítě. Zkus to za chvíli.' : error.message, em); $('#l-pass').focus();
   };
+}
+// ---------- dvoufázové ověření (TOTP: Google Authenticator, Authy, 1Password…) ----------
+let mfaState = 'unknown';            // 'ok' = přihlášen včetně druhého kroku
+function mfaShell(title, intro, inner) {
+  $('#crumb').innerHTML = ''; $('#user').innerHTML = '';
+  $('#view').innerHTML = `<section class="hero" style="max-width:440px;margin:0 auto">
+    <img src="logo.png" alt="" width="84" height="84" style="display:block;margin-bottom:18px">
+    <div class="eyebrow">Jointshon — FJ · interní nástroje</div><h1>${title}</h1><p>${intro}</p>${inner}
+    <div style="margin-top:14px"><button class="btn sm ghost" id="mfa-out">Odhlásit</button></div></section>`;
+  $('#mfa-out').onclick = () => sb.auth.signOut();
+}
+// pole na 6 číslic + zámek po 3 špatných kódech
+function mfaCodeForm(onSubmit, btnText) {
+  const btn = $('#m-btn'), box = $('#m-msg'), inp = $('#m-code'); let timer = null;
+  const tick = () => { const n = codeLock.left(); if (n > 0) { btn.disabled = true; btn.textContent = `Zamčeno · ${lockText(n)}`; box.hidden = false; box.textContent = `Příliš mnoho pokusů. Zkus to znovu za ${lockText(n)}.`; return true; } btn.disabled = false; btn.textContent = btnText; if (timer) { clearInterval(timer); timer = null; if (box.textContent.startsWith('Příliš')) box.hidden = true; } return false; };
+  if (tick()) timer = setInterval(() => { if (!document.body.contains(btn)) return clearInterval(timer); tick(); }, 1000);
+  inp.focus();
+  $('#m-form').onsubmit = async e => {
+    e.preventDefault(); if (codeLock.left() > 0) return tick();
+    const code = inp.value.replace(/\s/g, ''); if (!/^\d{6}$/.test(code)) { box.hidden = false; box.textContent = 'Zadej 6 číslic z aplikace.'; return; }
+    btn.disabled = true; btn.textContent = 'Ověřuji…';
+    const err = await onSubmit(code);
+    if (!err) { codeLock.reset(); return; }
+    codeLock.fail(); inp.value = ''; tick(); if (codeLock.left() === 0) { btn.disabled = false; btn.textContent = btnText; box.hidden = false; box.textContent = 'Kód nesedí. Zkus to znovu (kód se mění každých 30 s).'; }
+  };
+}
+const MFA_FORM = `<form id="m-form" class="card stack" style="margin-top:20px">
+  <label class="field"><span>Kód z aplikace</span><input type="text" id="m-code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="123456" style="font-size:22px;letter-spacing:6px;text-align:center"></label>
+  <div class="notice bad" id="m-msg" hidden></div><button class="btn primary" id="m-btn" style="width:100%"></button></form>`;
+async function renderMfaChallenge(s) {
+  const { data, error } = await sb.auth.mfa.listFactors();
+  const f = data?.totp?.[0];
+  if (error || !f) return mfaShell('Dvoufázové ověření', 'Nepodařilo se načíst ověření: ' + esc(error?.message || 'žádný faktor'), '');
+  mfaShell('Dvoufázové ověření', 'Otevři aplikaci s ověřovacími kódy a opiš 6místný kód pro SmartJoi.', MFA_FORM);
+  mfaCodeForm(async code => { const r = await sb.auth.mfa.challengeAndVerify({ factorId: f.id, code }); if (r.error) return r.error; await mfaEnter(); return null; }, 'Ověřit');
+}
+async function renderMfaEnroll(s) {
+  // nedokončené starší pokusy zruš, ať se nehromadí
+  try { const all = (await sb.auth.mfa.listFactors()).data?.all || []; for (const f of all.filter(x => x.status === 'unverified')) await sb.auth.mfa.unenroll({ factorId: f.id }); } catch {}
+  const { data, error } = await sb.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'SmartJoi ' + new Date().toISOString().slice(0, 10) + ' ' + Math.random().toString(36).slice(2, 6) });
+  if (error) return mfaShell('Dvoufázové ověření', 'Nepodařilo se připravit ověření: ' + esc(error.message), '');
+  const skip = `<div class="small muted" style="margin-top:10px"><a href="#" id="m-skip">Nastavím později</a></div>`;
+  mfaShell('Zapni dvoufázové ověření', 'Naskenuj QR kód v aplikaci (Google Authenticator, Authy, 1Password, Microsoft Authenticator…) a opiš 6místný kód. Pak se budeš přihlašovat heslem + kódem.',
+    `<div class="card stack" style="margin-top:20px;align-items:center"><img src="${esc(data.totp.qr_code)}" alt="QR kód" width="200" height="200" style="background:#fff;border-radius:10px;padding:8px">
+      <div class="small muted" style="text-align:center">Nejde naskenovat? Zadej ručně klíč:<br><code style="user-select:all;word-break:break-all">${esc(data.totp.secret)}</code></div></div>${MFA_FORM}${skip}`);
+  $('#m-skip').onclick = e => { e.preventDefault(); try { sessionStorage.setItem('sj-mfa-skip', '1'); } catch {} sb.auth.mfa.unenroll({ factorId: data.id }).catch(() => {}); mfaEnter(); };
+  mfaCodeForm(async code => { const r = await sb.auth.mfa.challengeAndVerify({ factorId: data.id, code }); if (r.error) return r.error; toast('Dvoufázové ověření zapnuto ✓'); await mfaEnter(); return null; }, 'Zapnout');
+}
+// po přihlášení: zjisti, jestli je třeba druhý krok; jinak spusť aplikaci
+async function mfaEnter() {
+  const { data: sd } = await sb.auth.getSession(); const s = sd?.session; if (!s) return renderLogin();
+  const { data: a } = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
+  let skipped = false; try { skipped = sessionStorage.getItem('sj-mfa-skip') === '1'; } catch {}
+  if (a?.nextLevel === 'aal2' && a.currentLevel !== 'aal2') return renderMfaChallenge(s);
+  if (a?.nextLevel === 'aal1' && !skipped && mfaState !== 'ok') return renderMfaEnroll(s);
+  const was = session; session = s; mfaState = 'ok'; renderUser(s); if (!was) chatRender();
+  if (!was) setTimeout(() => { render(); load(); }, 0);
 }
 function renderUser(session) {
   $('#user').innerHTML = `<button class="btn sm ghost" id="logout" title="${esc(session.user.email)}">Odhlásit</button>`;
@@ -3257,10 +3355,9 @@ let session = null;
 window.addEventListener('hashchange', () => { if (!session) return; closeModal(); render(); window.scrollTo(0, 0); });
 async function load() { try { await loadState(); } catch (e) { toast('Chyba: ' + e.message); } render(); }
 sb.auth.onAuthStateChange((_ev, s) => {
-  const was = session; session = s;
-  if (!s) { S = null; try { sessionStorage.removeItem('sj-chat'); } catch {} Object.assign(chat, { open: false, contents: [], log: [], pending: null }); chatRender(); return renderLogin(); }
-  renderUser(s); if (!was) chatRender();
-  if (!was) setTimeout(() => { render(); load(); }, 0);
+  if (!s) { session = null; mfaState = 'unknown'; S = null; try { sessionStorage.removeItem('sj-chat'); sessionStorage.removeItem('sj-mfa-skip'); } catch {} Object.assign(chat, { open: false, contents: [], log: [], pending: null }); chatRender(); return renderLogin(); }
+  if (mfaState === 'ok') { session = s; return; }               // obnova tokenu uvnitř přihlášené relace
+  setTimeout(() => mfaEnter(), 0);                               // supabase se uvnitř callbacku nevolá přímo
 });
 // obnova dat každou minutu (ne když zrovna něco vyplňuješ)
 setInterval(() => {

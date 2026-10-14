@@ -1,36 +1,62 @@
+@font-face { font-family: 'Archivo Variable'; font-style: normal; font-display: swap; font-weight: 100 900; font-stretch: 62% 125%; src: url(fonts/archivo-latin-ext-wdth-normal.woff2) format('woff2'); unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }
+@font-face { font-family: 'Archivo Variable'; font-style: normal; font-display: swap; font-weight: 100 900; font-stretch: 62% 125%; src: url(fonts/archivo-latin-wdth-normal.woff2) format('woff2'); unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
 :root {
-  --radius: 14px;
-  --font: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --bg: #0a0a0a; --panel: #121212; --panel-2: #181818; --field: #0f0f0f; --sunken: #101010; --notice: #141414;
-  --line: #262626; --line-2: #333; --row-line: #1c1c1c; --focus: #777; --hover-border: #555;
-  --text: #f5f5f5; --muted: #9a9a9a; --dim: #666; --code: #ddd; --caret: #888;
-  --btn: #1a1a1a; --btn-hover: #242424; --btn-hover-border: #444; --hover: #222; --chip: #1f1f1f; --count: #2a2a2a;
-  --inv-bg: #ffffff; --inv-fg: #0a0a0a; --inv-hover: #e6e6e6; --inv-muted: #555;
-  --topbar: rgba(10,10,10,.85); --backdrop: rgba(0,0,0,.7); --shadow: rgba(0,0,0,.6);
-  --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --info: #60a5fa;
+  --radius: 10px;
+  --font: "Archivo Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --accent: #f8ed58; --accent-ink: #15181a;
+  --bg: #16191c; --panel: #1e2327; --panel-2: #252b30; --field: #14171a; --sunken: #1a1e21; --notice: #21272b;
+  --line: #2d343a; --line-2: #3b444b; --row-line: #252b30; --focus: #f8ed58; --hover-border: #5a656d;
+  --text: #eef0f1; --muted: #9ba5ac; --dim: #6d7880; --code: #dfe4e7; --caret: #8c969d;
+  --btn: #252b30; --btn-hover: #2d343a; --btn-hover-border: #4b565e; --hover: #2a3035; --chip: #283036; --count: #343c43;
+  --inv-bg: #f8ed58; --inv-fg: #15181a; --inv-hover: #fff27e; --inv-muted: #5a5524;
+  --topbar: rgba(22,25,28,.88); --backdrop: rgba(8,10,12,.72); --shadow: rgba(0,0,0,.55);
+  --ok: #5fd68b; --warn: #ff9a4a; --bad: #ff7a72; --info: #6cb4ff;
+  --grain: rgba(255,255,255,.028);
+  color-scheme: dark;
+}
+:root[data-theme="dark"] {
+  --radius: 10px;
+  --font: "Archivo Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --accent: #f8ed58; --accent-ink: #15181a;
+  --bg: #16191c; --panel: #1e2327; --panel-2: #252b30; --field: #14171a; --sunken: #1a1e21; --notice: #21272b;
+  --line: #2d343a; --line-2: #3b444b; --row-line: #252b30; --focus: #f8ed58; --hover-border: #5a656d;
+  --text: #eef0f1; --muted: #9ba5ac; --dim: #6d7880; --code: #dfe4e7; --caret: #8c969d;
+  --btn: #252b30; --btn-hover: #2d343a; --btn-hover-border: #4b565e; --hover: #2a3035; --chip: #283036; --count: #343c43;
+  --inv-bg: #f8ed58; --inv-fg: #15181a; --inv-hover: #fff27e; --inv-muted: #5a5524;
+  --topbar: rgba(22,25,28,.88); --backdrop: rgba(8,10,12,.72); --shadow: rgba(0,0,0,.55);
+  --ok: #5fd68b; --warn: #ff9a4a; --bad: #ff7a72; --info: #6cb4ff;
+  --grain: rgba(255,255,255,.028);
   color-scheme: dark;
 }
 :root[data-theme="light"] {
-  --bg: #f4f4f2; --panel: #ffffff; --panel-2: #fafaf9; --field: #ffffff; --sunken: #f7f7f5; --notice: #f7f7f5;
-  --line: #e5e5e2; --line-2: #d6d6d2; --row-line: #ededea; --focus: #8a8a86; --hover-border: #b5b5b0;
-  --text: #0a0a0a; --muted: #5f5f5b; --dim: #8d8d88; --code: #262626; --caret: #6b6b67;
-  --btn: #ffffff; --btn-hover: #f1f1ef; --btn-hover-border: #b5b5b0; --hover: #efefec; --chip: #f1f1ef; --count: #e7e7e4;
-  --inv-bg: #0a0a0a; --inv-fg: #ffffff; --inv-hover: #2b2b2b; --inv-muted: #bdbdbd;
-  --topbar: rgba(244,244,242,.85); --backdrop: rgba(20,20,20,.45); --shadow: rgba(0,0,0,.18);
-  --ok: #15803d; --warn: #b45309; --bad: #dc2626; --info: #2563eb;
+  --radius: 10px;
+  --font: "Archivo Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --accent: #f8ed58; --accent-ink: #14181a;
+  --bg: #e4e7e8; --panel: #f6f7f7; --panel-2: #eef0f0; --field: #ffffff; --sunken: #eceeef; --notice: #eef0f0;
+  --line: #d0d6d8; --line-2: #bcc4c8; --row-line: #dde1e3; --focus: #14181a; --hover-border: #8b979d;
+  --text: #14181a; --muted: #546067; --dim: #7b868d; --code: #22282b; --caret: #6a757b;
+  --btn: #fbfbfb; --btn-hover: #eef0f0; --btn-hover-border: #8b979d; --hover: #e6e9ea; --chip: #e8ebed; --count: #d8dde0;
+  --inv-bg: #f8ed58; --inv-fg: #14181a; --inv-hover: #efe03a; --inv-muted: #5b5628;
+  --topbar: rgba(228,231,232,.9); --backdrop: rgba(20,24,26,.45); --shadow: rgba(0,0,0,.18);
+  --ok: #17803f; --warn: #c2570c; --bad: #cf2f2a; --info: #1f5fd1;
+  --grain: rgba(20,24,26,.035);
   color-scheme: light;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]):not([data-theme="light"]) {
-  --bg: #f4f4f2; --panel: #ffffff; --panel-2: #fafaf9; --field: #ffffff; --sunken: #f7f7f5; --notice: #f7f7f5;
-  --line: #e5e5e2; --line-2: #d6d6d2; --row-line: #ededea; --focus: #8a8a86; --hover-border: #b5b5b0;
-  --text: #0a0a0a; --muted: #5f5f5b; --dim: #8d8d88; --code: #262626; --caret: #6b6b67;
-  --btn: #ffffff; --btn-hover: #f1f1ef; --btn-hover-border: #b5b5b0; --hover: #efefec; --chip: #f1f1ef; --count: #e7e7e4;
-  --inv-bg: #0a0a0a; --inv-fg: #ffffff; --inv-hover: #2b2b2b; --inv-muted: #bdbdbd;
-  --topbar: rgba(244,244,242,.85); --backdrop: rgba(20,20,20,.45); --shadow: rgba(0,0,0,.18);
-  --ok: #15803d; --warn: #b45309; --bad: #dc2626; --info: #2563eb;
+  --radius: 10px;
+  --font: "Archivo Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --accent: #f8ed58; --accent-ink: #14181a;
+  --bg: #e4e7e8; --panel: #f6f7f7; --panel-2: #eef0f0; --field: #ffffff; --sunken: #eceeef; --notice: #eef0f0;
+  --line: #d0d6d8; --line-2: #bcc4c8; --row-line: #dde1e3; --focus: #14181a; --hover-border: #8b979d;
+  --text: #14181a; --muted: #546067; --dim: #7b868d; --code: #22282b; --caret: #6a757b;
+  --btn: #fbfbfb; --btn-hover: #eef0f0; --btn-hover-border: #8b979d; --hover: #e6e9ea; --chip: #e8ebed; --count: #d8dde0;
+  --inv-bg: #f8ed58; --inv-fg: #14181a; --inv-hover: #efe03a; --inv-muted: #5b5628;
+  --topbar: rgba(228,231,232,.9); --backdrop: rgba(20,24,26,.45); --shadow: rgba(0,0,0,.18);
+  --ok: #17803f; --warn: #c2570c; --bad: #cf2f2a; --info: #1f5fd1;
+  --grain: rgba(20,24,26,.035);
   color-scheme: light;
-}
+  }
 }
 /* === konec proměnných motivu === */
 * { box-sizing: border-box; }
@@ -594,3 +620,86 @@ td.asel, th:first-child input { cursor: default; }
   .ap-km { text-align: left; }
   .ap-due { flex-wrap: wrap; } .ap-due .btn { margin-left: 46px; }
 }
+
+/* ======================================================================
+   Vzhled v2 — „stavba“: beton, grafit a značkovací žlutá z loga.
+   Hub je poskládaný jako podlaha (prkna s posunutými spárami).
+   ====================================================================== */
+body { font-family: var(--font); font-stretch: 100%; font-feature-settings: "tnum" 0; letter-spacing: -.005em; }
+h1, h2, h3 { font-family: var(--font); }
+h1 { font-stretch: 116%; font-weight: 800; letter-spacing: -.025em; }
+h2 { font-stretch: 106%; font-weight: 700; letter-spacing: -.012em; }
+h3 { font-weight: 700; letter-spacing: -.01em; }
+.stat .v, .ap-km .v, .ap-tile .v, .pipe-n, .rj-hero-m { font-stretch: 112%; font-weight: 780; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
+::selection { background: var(--accent); color: var(--accent-ink); }
+
+/* štítky bez velkých písmen a bez zbytečných nadpisků */
+.eyebrow { display: none; }
+label.field > span, .em-label, .pipe-l, .ap-fuel { text-transform: none; letter-spacing: 0; }
+label.field > span { font-size: 12.5px; font-weight: 600; }
+th { text-transform: none; letter-spacing: 0; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.ogroup-h { text-transform: none; letter-spacing: 0; font-size: 15px; font-weight: 700; color: var(--text); font-stretch: 106%; }
+.ap-fuel { font-size: 12px; font-weight: 600; }
+
+/* povrchy: méně zaoblení, žádné stíny, tlačítka jako značkovač */
+.topbar { border-bottom: 1px solid var(--line); }
+.brand-text { font-stretch: 112%; font-weight: 800; letter-spacing: -.02em; }
+.card, .stat, .group, .auf { border-radius: var(--radius); }
+.modal { border-radius: 14px; }
+.btn { border-radius: 8px; font-weight: 600; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: rgba(0,0,0,.18); box-shadow: inset 0 -2px 0 rgba(0,0,0,.16); }
+.btn.primary:hover { background: var(--inv-hover); }
+.btn.primary:active { transform: translateY(1px); box-shadow: none; }
+.tab.active, .chip.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.tab.active .count { background: rgba(0,0,0,.16); color: var(--accent-ink); }
+.chip.on .muted { color: rgba(0,0,0,.55); }
+.tabs { border-radius: 10px; }
+.tab { border-radius: 7px; }
+.badge { font-weight: 600; }
+
+/* klidnější pohyb: žádné vstupní animace na každém prvku */
+.pipe-t, .orow, .nextship, .card.ship, .fadein, .ap-card, .ap-tile, .ap-month, .rj-m, .rj-hero { animation: none; }
+.pipe-t.st-issue:not(.zero) { animation: sj-glow 2.4s ease-in-out 1s infinite; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; } }
+
+/* ---------- hub ---------- */
+.hero { padding: 30px 0 20px; }
+.hero h1 { font-size: clamp(34px, 6.4vw, 60px); line-height: 1; letter-spacing: -.035em; margin: 0 0 6px; }
+.hero p { color: var(--muted); font-size: 16px; max-width: 60ch; }
+.attn { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.attn-i { display: inline-flex; align-items: center; gap: 10px; padding: 9px 14px 9px 12px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--c, var(--line-2)); color: var(--text); text-decoration: none; font-weight: 600; font-size: 14.5px; transition: border-color .15s, background .15s; }
+.attn-i:hover { background: var(--panel-2); border-color: var(--hover-border); border-left-color: var(--c, var(--line-2)); }
+.attn-i b { font-stretch: 116%; font-weight: 800; font-size: 20px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; min-width: 1ch; }
+.attn-i.bad { --c: var(--bad); } .attn-i.warn { --c: var(--warn); } .attn-i.info { --c: var(--info); }
+.attn-ok { display: inline-flex; align-items: center; gap: 8px; color: var(--ok); font-weight: 600; margin-top: 16px; }
+
+.apps { display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; margin-top: 8px; }
+.app-card { grid-column: span 6; position: relative; min-height: 148px; gap: 8px; padding: 18px 20px 16px; border-radius: 4px; background-color: var(--panel);
+  background-image: repeating-linear-gradient(93deg, var(--grain) 0 1px, transparent 1px 9px), repeating-linear-gradient(87deg, var(--grain) 0 1px, transparent 1px 23px);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04), inset 0 -2px 0 rgba(0,0,0,.14); transition: border-color .15s, transform .15s, background-color .15s; }
+.app-card:nth-child(4n+1) { grid-column: span 7; } .app-card:nth-child(4n+2) { grid-column: span 5; }
+.app-card:nth-child(4n+3) { grid-column: span 5; } .app-card:nth-child(4n+4) { grid-column: span 7; }
+.app-card::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--accent); transform: scaleY(0); transform-origin: top; transition: transform .2s ease; }
+.app-card:hover { transform: none; background-color: var(--panel-2); border-color: var(--hover-border); }
+.app-card:hover::after, .app-card:focus-visible::after { transform: scaleY(1); }
+.app-card .num { display: none; }
+.app-card h3 { font-size: 22px; font-stretch: 112%; font-weight: 800; letter-spacing: -.02em; }
+.app-card p { font-size: 14.5px; max-width: 52ch; }
+.app-icon { width: 34px; height: 34px; border-radius: 6px; font-size: 18px; background: var(--chip); border-color: var(--line); }
+.apps.lay .app-card { animation: sj-lay .55s cubic-bezier(.2,.75,.2,1) both; animation-delay: calc((var(--k, 0)) * 60ms); }
+.apps.lay .app-card:nth-child(1) { --k: 0; } .apps.lay .app-card:nth-child(2) { --k: 1; } .apps.lay .app-card:nth-child(3) { --k: 2; } .apps.lay .app-card:nth-child(4) { --k: 3; }
+.apps.lay .app-card:nth-child(5) { --k: 4; } .apps.lay .app-card:nth-child(6) { --k: 5; } .apps.lay .app-card:nth-child(7) { --k: 6; } .apps.lay .app-card:nth-child(8) { --k: 7; }
+@keyframes sj-lay { from { opacity: 0; transform: translateX(-18px); } to { opacity: 1; transform: none; } }
+@media (max-width: 760px) { .apps { grid-template-columns: 1fr; } .app-card, .app-card:nth-child(n) { grid-column: auto; min-height: 0; } .hero h1 { font-size: clamp(32px, 10vw, 44px); } }
+
+/* ---------- AutoPark / ostatní drobnosti dolaďené k novému stylu ---------- */
+.ap-card { border-radius: 6px; }
+.ap-tile, .ap-month { border-radius: 8px; }
+.pipe-t { border-radius: 8px; }
+.rj-hero { border-radius: 10px; }
+.hero[style*="max-width"] h1 { font-size: clamp(28px, 7vw, 38px); line-height: 1.06; margin-top: 4px; }
+.hero[style*="max-width"] .card.stack > img { margin: 0 auto; display: block; }
+body { font-stretch: 103%; letter-spacing: 0; word-spacing: .05em; }
+:root[data-theme="light"] { --grain: rgba(20,24,26,.026); }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]):not([data-theme="light"]) { --grain: rgba(20,24,26,.026); } }
