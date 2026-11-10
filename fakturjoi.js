@@ -309,11 +309,34 @@ export function createFj(c) {
     };
   }
 
+  // ---------- často účtované položky ----------
+  const MONTH_RE = /(leden|únor|březen|duben|květen|červen|červenec|srpen|září|říjen|listopad|prosinec)\s+(\d{4})/i;
+  // „… - Září 2026“ → měsíc před datem vystavení (služby se fakturují zpětně)
+  function adaptText(text, issued) {
+    const m = MONTH_RE.exec(text); if (!m) return text;
+    let y = +issued.slice(0, 4), mo = +issued.slice(5, 7) - 1; if (mo < 1) { mo = 12; y--; }
+    let name = MONTHS[mo - 1]; if (m[1][0] === m[1][0].toUpperCase()) name = name[0].toUpperCase() + name.slice(1);
+    return text.replace(MONTH_RE, `${name} ${y}`);
+  }
+  function usualItems(clientId, issued) {
+    const g = new Map();
+    for (const inv of live().sort((a, b) => a.issued.localeCompare(b.issued))) for (const it of inv.items) {
+      if (!it.text || !(Number(it.price) > 0) && !(Number(it.price) < 0)) continue;
+      const key = it.text.toLowerCase().replace(MONTH_RE, '#');
+      const e = g.get(key) || { text: it.text, price: it.price, qty: it.qty ?? 1, unit: it.unit || '', all: 0, mine: 0 };
+      e.all++; if (clientId && inv.client_id === clientId) e.mine++; e.text = it.text; e.price = it.price; e.qty = it.qty ?? 1; e.unit = it.unit || '';
+      g.set(key, e);
+    }
+    let list = [...g.values()];
+    if (clientId && list.some(e => e.mine)) list = list.filter(e => e.mine);
+    return list.sort((a, b) => (b.mine - a.mine) || (b.all - a.all)).slice(0, 6).map(e => ({ ...e, text: adaptText(e.text, issued) }));
+  }
+
   // ---------- editor faktury ----------
   function newDraft(src, clientId) {
     const s = I().settings, today = todayIso();
     const d = { id: null, number: nextNumber(today), client_id: clientId || '', issued: today, due: addDays(today, s.due_days), payment_method: s.payment_method, vs: '', status: 'issued', paid_at: '', items: [{ text: '', qty: '1', unit: '', price: '' }], note: '', numAuto: true, dueAuto: true, vsAuto: true, supplier: null };
-    if (src) { d.client_id = src.client_id || ''; d.payment_method = src.payment_method; d.items = src.items.map(it => ({ text: it.text, qty: String(it.qty ?? 1), unit: it.unit || '', price: String(it.price ?? '') })); d.note = src.note || ''; }
+    if (src) { d.client_id = src.client_id || ''; d.payment_method = src.payment_method; d.items = src.items.map(it => ({ text: adaptText(it.text, d.issued), qty: String(it.qty ?? 1), unit: it.unit || '', price: String(it.price ?? '') })); d.note = src.note || ''; }
     d.vs = vsOf(d.number);
     return d;
   }
@@ -343,6 +366,7 @@ export function createFj(c) {
           <label class="field"><span>Variabilní symbol</span><input type="text" inputmode="numeric" id="fe-vs" value="${esc(d.vs)}"></label>
         </div>
         <h3 style="margin:18px 0 8px">Položky</h3>
+        <div id="fe-sug" class="fj-sug"></div>
         <div id="fe-items"></div>
         <div class="row" style="justify-content:space-between;align-items:center;margin-top:8px"><button class="btn sm ghost" id="fe-add">＋ Položka</button><div class="fj-total">Celkem <b id="fe-total"></b></div></div>
         <label class="field" style="margin-top:14px"><span>Poznámka na faktuře (nepovinné)</span><input type="text" id="fe-note" value="${esc(d.note)}"></label>
@@ -368,13 +392,29 @@ export function createFj(c) {
       document.querySelectorAll('#fe-items [data-rm]').forEach(b => b.onclick = () => { if (d.items.length > 1) d.items.splice(+b.dataset.rm, 1); else d.items[0] = { text: '', qty: '1', unit: '', price: '' }; drawItems(); });
       recalc();
     };
+    const emptyRow = it => !it.text.trim() && !String(it.price).trim();
+    const addItem = u => {
+      const row = { text: u.text, qty: String(u.qty ?? 1), unit: u.unit || '', price: String(u.price) };
+      const last = d.items[d.items.length - 1];
+      if (last && emptyRow(last)) d.items[d.items.length - 1] = row; else d.items.push(row);
+      drawItems();
+    };
+    const drawSug = () => {
+      const list = usualItems(d.client_id, d.issued), box = $('#fe-sug');
+      box.innerHTML = list.length ? `<div class="small muted" style="margin-bottom:6px">${d.client_id && clientById(d.client_id) ? 'Co ' + esc(clientById(d.client_id).name) + ' obvykle fakturuješ' : 'Často fakturuješ'} — klepnutím přidáš:</div><div class="chips">${list.map((u, i) => `<button type="button" class="chip" data-sug="${i}" title="${esc(u.text)}">${esc(u.text.split('\n')[0].slice(0, 46))}${u.text.split('\n')[0].length > 46 ? '…' : ''} · ${esc(kc(u.price))}</button>`).join('')}</div>` : '';
+      box.querySelectorAll('[data-sug]').forEach(b => b.onclick = () => addItem(list[+b.dataset.sug]));
+      return list;
+    };
     drawItems();
+    drawSug();
     $('#fe-add').onclick = () => { d.items.push({ text: '', qty: '1', unit: '', price: '' }); drawItems(); const last = document.querySelectorAll('#fe-items [data-f="text"]'); last[last.length - 1].focus(); };
     const payUi = () => { $('#fe-paid-f').style.display = d.status === 'paid' ? '' : 'none'; };
     payUi();
     $('#fe-client').onchange = e => {
       if (e.target.value === '__new') { e.target.value = d.client_id; return clientModal(null, nid => { d.client_id = nid; c.render(); }); }
       d.client_id = e.target.value;
+      const list = drawSug();
+      if (!editing && d.items.length === 1 && emptyRow(d.items[0]) && list[0]) addItem(list[0]);   // předvyplň nejčastější položku
     };
     $('#fe-number').oninput = e => { d.number = e.target.value.trim(); d.numAuto = false; if (d.vsAuto) { d.vs = vsOf(d.number); $('#fe-vs').value = d.vs; } };
     $('#fe-vs').oninput = e => { d.vs = e.target.value.replace(/\D/g, '').slice(0, 10); d.vsAuto = false; };
@@ -382,6 +422,7 @@ export function createFj(c) {
       d.issued = e.target.value || todayIso();
       if (d.numAuto) { d.number = nextNumber(d.issued); $('#fe-number').value = d.number; if (d.vsAuto) { d.vs = vsOf(d.number); $('#fe-vs').value = d.vs; } }
       if (d.dueAuto) { d.due = addDays(d.issued, I().settings.due_days); $('#fe-due').value = d.due; }
+      drawSug();
     };
     $('#fe-due').onchange = e => { d.due = e.target.value; d.dueAuto = false; };
     $('#fe-pay').onchange = e => { d.payment_method = e.target.value; };
