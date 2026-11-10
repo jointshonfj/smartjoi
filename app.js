@@ -1,9 +1,10 @@
 /* SmartJoi — frontend (GitHub Pages + Supabase) */
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
-import * as DC from './dochazka-core.js?v=20261014a';
-import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261014a';
-import * as SU from './stockupdate-core.js?v=20261014a';
+import * as DC from './dochazka-core.js?v=20261110a';
+import { addAttendanceSheet, downloadWorkbook, workbookBuffer } from './dochazka-xlsx.js?v=20261110a';
+import * as SU from './stockupdate-core.js?v=20261110a';
+import { createFj, fjNormalize } from './fakturjoi.js?v=20261110a';
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let S = null;            // stav ze serveru
@@ -97,9 +98,20 @@ async function fetchAll(table, build = q => q) {
     if (rows.length < 1000) return out;
   }
 }
+// FakturJoi: když se tabulky nepodaří načíst, zbytek SmartJoi funguje dál
+async function fjLoad() {
+  try {
+    const [settings, clients, invoices] = await Promise.all([
+      sb.from('invoice_settings').select('*').eq('id', 1).maybeSingle().then(ok),
+      fetchAll('invoice_clients', q => q.order('name')),
+      fetchAll('invoices', q => q.order('issued', { ascending: false })),
+    ]);
+    return fjNormalize({ settings, clients, invoices });
+  } catch (e) { console.warn('FakturJoi', e); return null; }
+}
 async function loadState() {
   const since = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock, attEmps, attMonths, aiMem, attHol, suCfg, suRuns, reps, vehs, vevs] = await Promise.all([
+  const [st, sups, prods, orders, items, aufs, ships, events, emails, stock, attEmps, attMonths, aiMem, attHol, suCfg, suRuns, reps, vehs, vevs, fjInv] = await Promise.all([
     sb.from('settings').select('*').eq('id', 1).single().then(ok),
     fetchAll('suppliers', q => q.order('name')),
     fetchAll('products', q => q.order('code')),
@@ -119,6 +131,7 @@ async function loadState() {
     fetchAll('reports', q => q.order('period', { ascending: false })).catch(() => []),
     fetchAll('vehicles', q => q.order('sort').order('name')).catch(() => null),
     fetchAll('vehicle_events', q => q.order('done_on')).catch(() => []),
+    fjLoad(),
   ]);
   const products = {};
   for (const p of prods) products[p.code] = { supplierId: p.skip ? 'none' : (p.supplier_id || ''), supplierCode: p.supplier_code, supplierName: p.supplier_name, name: p.name, nameEn: p.name_en || '', nameEnSrc: p.name_en_src || '', mpn: p.mpn || '', shoptetSupplier: p.shoptet_supplier || '' };
@@ -142,6 +155,7 @@ async function loadState() {
     reports: reps,
     vehicles: vehs && vehs.map(v => ({ ...v, km: v.km == null ? null : Number(v.km), km_at: v.km_at ? String(v.km_at).slice(0, 10) : null })),
     vehicleEvents: vevs.map(e => ({ ...e, done_on: e.done_on ? String(e.done_on).slice(0, 10) : null, valid_until: e.valid_until ? String(e.valid_until).slice(0, 10) : null, km: e.km == null ? null : Number(e.km), next_km: e.next_km == null ? null : Number(e.next_km), cost: e.cost == null ? null : Number(e.cost) })),
+    inv: fjInv,
     suRuns: suRuns.map(r => ({ ...r, week: String(r.week).slice(0, 10) })),
     emails: emails.map(e => ({ id: e.id, title: e.title, category: e.category || '', to: e.to_addr || '', cc: e.cc || '', subject: e.subject || '', body: e.body || '', note: e.note || '', pinned: !!e.pinned, useCount: e.use_count || 0, lastUsed: e.last_used_at, updatedAt: e.updated_at })),
     sync: { fetchedAt: st.last_sync_at, error: st.last_sync_error, errorAt: st.last_sync_error_at, headers: st.sync_headers || [], rowCount: st.sync_row_count, sample: st.sync_sample || [], statuses: st.sync_statuses || {} },
@@ -237,6 +251,7 @@ function render() {
   }
   if (r.app === 'reporty') { const site = RJ_SITES.some(x => x[0] === r.tab) ? r.tab : (ui.rjSite || 'cz'); crumb.innerHTML = `<span>/</span><a href="#/reporty/${site}">ReportJoi</a>${r.id && /^\d{4}-\d{2}$/.test(r.id) ? `<span>/</span><b>${esc(rjLabel(r.id))}</b>` : ''}`; return renderReportApp(site, r.id); }
   if (r.app === 'autopark') { const v = r.tab === 'v' && S.vehicles ? apVehicle(r.id) : null; crumb.innerHTML = `<span>/</span><a href="#/autopark">AutoPark</a>${v ? `<span>/</span><b>${esc(v.name)}</b>` : r.tab === 'plan' ? '<span>/</span><b>Plán roku</b>' : ''}`; return renderApApp(r.tab, r.id); }
+  if (r.app === 'fakturjoi') { crumb.innerHTML = FJ.crumb(r.tab, r.id); return FJ.render(r.tab, r.id); }
   if (r.app === 'stockupdate') { crumb.innerHTML = `<span>/</span><a href="#/stockupdate">StockUpdate 1.0</a>${r.tab === 'w' && r.id ? `<span>/</span><b>${weekLabel(mondayOf(r.id))}</b>` : ''}`; return renderSuApp(r.tab === 'w' ? r.id : ''); }
   if (r.app === 'sklad') {
     const it = r.tab === 'p' ? stItem(r.id) : null;
@@ -259,6 +274,7 @@ function hubAttention(c) {
   add(c.todo, 'k objednání', '#/objednavky', 'warn');
   add(c.toReceive, c.toReceive === 1 ? 'svoz k převzetí' : 'svozy k převzetí', '#/objednavky/svozy', 'info');
   if (S.vehicles) { const a = apCounts(); add(a.bad, 'u aut po termínu', '#/autopark', 'bad'); add(a.warn, 'u aut do 30 dní', '#/autopark', 'warn'); }
+  FJ.attention().forEach(a => out.push(a));
   try { const m = ui.attMonth || prevMonth(); const miss = S.att.employees.filter(e => e.active && !attRec(e.id, m)?.entries.length).length; add(miss, `bez docházky za ${monthLabel(m).split(' ')[0]}`, '#/dochazka', 'info'); } catch {}
   try { const w = mondayOf(); if (suCfgs().length && suCfgs().some(x => !suRun(x.id, w))) add(suCfgs().filter(x => !suRun(x.id, w)).length, 'StockUpdate čeká', '#/stockupdate', 'info'); } catch {}
   return out;
@@ -324,6 +340,12 @@ function renderHub() {
         <p>Evidence vozidel — STK, dálniční známky, pojištění, olej a servisní historie. Termíny hlídá a dává do kalendáře.</p>
         <div class="badge-row">${(() => { if (!S.vehicles) return '<span class="badge">nenačteno</span>'; const c = apCounts(); return `<span class="badge">${plural(apActive().length, 'vozidlo', 'vozidla', 'vozidel')}</span>${c.bad ? `<span class="badge bad"><span class="dot"></span>${c.bad} po termínu</span>` : ''}${c.warn ? `<span class="badge warn"><span class="dot"></span>${c.warn} do 30 dní</span>` : ''}${!c.bad && !c.warn ? '<span class="badge ok"><span class="dot"></span>Vše platné</span>' : ''}`; })()}</div>
       </a>
+      <a class="app-card" href="#/fakturjoi">
+        <div class="row"><div class="app-icon">🧾</div></div>
+        <h3>FakturJoi</h3>
+        <p>Faktury jako ve Fakturoidu — vystavení, PDF s QR platbou, evidence plateb, odběratelé a hlídání limitu obratu.</p>
+        <div class="badge-row">${FJ.hubBadges()}</div>
+      </a>
       <a class="app-card" href="#/kalendar">
         <div class="row"><div class="app-icon">📅</div></div>
         <h3>Kalendář</h3>
@@ -352,7 +374,7 @@ export const SJCalendar = {
 function renderCalendar() {
   const up = S.events.filter(e => e.starts_on >= todayIso());
   const past = S.events.filter(e => e.starts_on < todayIso()).reverse();
-  const APPN = { objednavky: '📦 OrderJoi', stockupdate: '🔄 StockUpdate', autopark: '🚗 AutoPark' };
+  const APPN = { objednavky: '📦 OrderJoi', stockupdate: '🔄 StockUpdate', autopark: '🚗 AutoPark', fakturjoi: '🧾 FakturJoi' };
   const row = e => `<tr><td style="white-space:nowrap"><b>${esc(fmtDay(e.starts_on))}</b></td><td>${esc(e.title)}<div class="sub">${esc(APPN[e.app] || e.app)}</div></td>
     <td style="text-align:right"><a class="btn sm" target="_blank" rel="noopener" href="${esc(gcalLink({ title: e.title, date: e.starts_on, details: e.details }))}">＋ Google</a></td></tr>`;
   $('#view').innerHTML = `
@@ -707,6 +729,9 @@ function apEditVehicle(v) {
     act(async () => { ok(await sb.from('vehicles').delete().eq('id', v.id)); for (const k of AP_TRACK) await SJCalendar.remove(`auto:${v.id}:${k}`); }, 'Smazáno').then(() => { location.hash = '#/autopark'; });
   };
 }
+
+// ---------- APLIKACE 08: FAKTURJOI (modul fakturjoi.js) ----------
+const FJ = createFj({ sb, S: () => S, ui, $, esc, toast, act, ok, plural, todayIso, addDays: (iso, n) => addDays(iso, n), closeModal, SJCalendar, render, loadState });
 
 // ---------- APLIKACE 06: REPORTJOI ----------
 // Měsíční reporty (HTML) pro vinylor.cz / vinylor.sk: uložené v Supabase Storage (bucket „reports“), každý má svůj odkaz #/reporty/cz/2026-09

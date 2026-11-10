@@ -17,6 +17,8 @@ Interní aplikace Jointshon | FJ. Běží na **GitHub Pages**, data jsou v **Sup
 
 **Aplikace 07 – AutoPark 🚗:** evidence vozidel (tabulky `vehicles`, `vehicle_events`). Hlídá STK, dálniční známku, pojištění a olej (poslední „platí do“ za druh), termíny zapisuje do kalendáře SmartJoi (ref `auto:<vozidlo>:<druh>`). Ostatní servis (filtry, rozvody, brzdy, geometrie, pneu…) je historie.
 
+**Aplikace 08 – FakturJoi 🧾:** vystavování a evidence faktur pro neplátce DPH (tabulky `invoices`, `invoice_clients`, `invoice_settings`; kód v `fakturjoi.js`). Číslování `RR-NNN` (VS = číslice z čísla), položky s množstvím a cenou, stavy čeká / uhrazeno / po splatnosti / storno, odběratelé se součty, přehled s hlídáním limitu obratu (aktuální + předchozích 11 kalendářních měsíců, bez stornovaných; výchozí 2 000 000 Kč, mění se v Nastavení). Tisk do PDF přes „Tisk / uložit PDF“ (QR platba ve formátu SPD, IBAN se počítá z čísla účtu; `qr.js` je vendorovaná knihovna qrcode-generator, MIT). Splatnost nezaplacených faktur jde do kalendáře SmartJoi (ref `faktura:<id>`, bez částky). Na faktuře zůstávají údaje dodavatele a odběratele z doby vystavení (snapshot v řádku faktury).
+
 **SmartJoiAI** (✦ vpravo dole): asistent na Google Gemini, umí pracovat se všemi aplikacemi; změny provede až po schválení.
 Pamatuje si pravidla (Docházka → Přehled → „Co si SmartJoiAI pamatuje“).
 
